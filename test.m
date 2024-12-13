@@ -864,10 +864,12 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
                 ARG2=QQ.ARG;
                 if master==0
                     QQ.KSP_processed(1,n1)=1    ;  % STARTING
-                    KSP2a=QQ.KSP2([1:ARG.kernel_size(1)]+(n1-1),:,:,:); lambda=ARG2.LLR_scale*ARG.NVR_threshold;
+                    KSP2a=QQ.KSP2([1:ARG.kernel_size(1)]+(n1-1),:,:,:);
+                    lambda=ARG2.LLR_scale*ARG.NVR_threshold;
                 else
                     QQ.KSP_processed(1,n1)=1    ;  % STARTING
-                    KSP2a=KSP2([1:ARG.kernel_size(1)]+(n1-1),:,:,:); lambda=ARG2.LLR_scale*ARG.NVR_threshold;
+                    KSP2a=KSP2([1:ARG.kernel_size(1)]+(n1-1),:,:,:);
+                    lambda=ARG2.LLR_scale*ARG.NVR_threshold;
 
                 end
 
