@@ -257,17 +257,17 @@ def run_nordic(
             energy_removed,
             SNR_weight,
         ) = sub_LLR_Processing(
-            KSP_recon,
-            KSP2,
-            ARG,
-            n1,
-            QQ,
-            master_fast,
-            KSP_weight,
-            NOISE,
-            Component_threshold,
-            energy_removed,
-            SNR_weight,
+            KSP_recon=KSP_recon,
+            KSP2=KSP2,
+            ARG=ARG,
+            n1=n1,
+            QQ=QQ,
+            master=master_fast,
+            KSP2_weight=KSP_weight,
+            NOISE=NOISE,
+            Component_threshold=Component_threshold,
+            energy_removed=energy_removed,
+            SNR_weight=SNR_weight,
         )
 
     KSP_recon = KSP_recon / KSP_weight[..., None]
@@ -276,7 +276,7 @@ def run_nordic(
     ARG["energy_removed"] = energy_removed / KSP_weight
     ARG["SNR_weight"] = SNR_weight / KSP_weight
     IMG2 = KSP_recon
-    ARG2 = ARG
+    # ARG2 = ARG
     print("completed estimating g-factor")
     gfactor = ARG["NOISE"]
 
@@ -443,18 +443,19 @@ def run_nordic(
             energy_removed,
             SNR_weight,
         ) = sub_LLR_Processing(
-            KSP_recon,
-            KSP2,
-            ARG,
-            n1,
-            QQ,
-            master_fast,
-            KSP_weight,
-            NOISE,
-            Component_threshold,
-            energy_removed,
-            SNR_weight,
+            KSP_recon=KSP_recon,
+            KSP2=KSP2,
+            ARG=ARG,
+            n1=n1,
+            QQ=QQ,
+            master=master_fast,
+            KSP2_weight=KSP_weight,
+            NOISE=NOISE,
+            Component_threshold=Component_threshold,
+            energy_removed=energy_removed,
+            SNR_weight=SNR_weight,
         )
+
     # Assumes that the combination is with N instead of sqrt(N). Works for NVR not MPPCA
     KSP_recon = KSP_recon / KSP_weight[..., None]
     ARG["NOISE"] = np.sqrt(NOISE / KSP_weight)
@@ -528,6 +529,7 @@ def sub_LLR_Processing(
 ):
     """Do something."""
     import pickle
+    import os
 
     slice_idx = np.arange(0, ARG["kernel_size"][0]) + (n1 - 1)
 
@@ -545,17 +547,22 @@ def sub_LLR_Processing(
     if QQ["KSP_processed"][0, n1] != 1 and QQ["KSP_processed"][0, n1] != 3:
         # processed but not added
         if QQ["KSP_processed"][0, n1] == 2 and master == 1:
+            DATA_full2 = None
+
             # loading instead of processing
             # load file as soon as save, if more than 10 sec, just do the recon instead.
-            try:
-                ...
-            except FileNotFoundError:
-                ...
+            data_file = ARG["filename"] + "slice" + str(n1) + ".pkl"
+            # if file doesn't exist go to next slice
+            if not os.path.isfile(data_file):
+                QQ["KSP_processed"][0, n1] = 0  # identified as bad file and being identified for reprocessing
+            else:
+                with open(data_file, "rb") as f:
+                    DATA_full2 = pickle.load(f)
 
         if QQ["KSP_processed"][0, n1] != 2:
             # block for other processes
             QQ["KSP_processed"][0, n1] = 1
-            if "DATA_full2" not in locals():
+            if DATA_full2 is None:
                 ARG2 = QQ["ARG"]
                 if master == 0:
                     QQ["KSP_processed"][0, n1] = 1  # STARTING
@@ -569,12 +576,12 @@ def sub_LLR_Processing(
 
                 if ARG["patch_average"] == 1:
                     DATA_full2, KSP2_weight = subfunction_loop_for_NVR_avg(
-                        KSP2a,
-                        ARG["kernel_size"][2],
-                        ARG["kernel_size"][1],
-                        lambda_,
-                        ARG["soft_thrs"],
-                        KSP2_weight,
+                        KSP2a=KSP2a,
+                        w3=ARG["kernel_size"][2],
+                        w2=ARG["kernel_size"][1],
+                        lambda2=lambda_,
+                        soft_thrs=ARG["soft_thrs"],
+                        KSP2_weight=KSP2_weight,
                     )
                 else:
                     KSP2_weight_tmp = KSP2_weight[slice_idx, :, :]
@@ -591,19 +598,18 @@ def sub_LLR_Processing(
                         energy_removed_tmp,
                         SNR_weight_tmp,
                     ) = subfunction_loop_for_NVR_avg_update(
-                        KSP2a,
-                        ARG["kernel_size"][2],
-                        ARG["kernel_size"][1],
-                        ARG["kernel_size"][0],
-                        lambda_,
-                        1,
-                        ARG["soft_thrs"],
-                        KSP2_weight_tmp,
-                        ARG,
-                        NOISE_tmp,
-                        Component_threshold_tmp,
-                        energy_removed_tmp,
-                        SNR_weight_tmp,
+                        KSP2a=KSP2a,
+                        w3=ARG["kernel_size"][2],
+                        w2=ARG["kernel_size"][1],
+                        lambda2=lambda_,
+                        patch_avg=1,
+                        soft_thrs=ARG["soft_thrs"],
+                        KSP2_weight=KSP2_weight_tmp,
+                        ARG=ARG,
+                        NOISE=NOISE_tmp,
+                        KSP2_tmp_update_threshold=Component_threshold_tmp,
+                        energy_removed=energy_removed_tmp,
+                        SNR_weight=SNR_weight_tmp,
                     )
 
                     KSP2_weight[slice_idx, :, :] = KSP2_weight_tmp
@@ -645,7 +651,7 @@ def sub_LLR_Processing(
 
 
 def subfunction_loop_for_NVR_avg(
-    KSP2a, w3, w2, w1, lambda2, patch_avg=1, soft_thrs=None, KSP2_weight=None, ARG=None
+    KSP2a, w3, w2, lambda2, patch_avg=1, soft_thrs=None, KSP2_weight=None, ARG=None
 ):
     """Do something."""
 
@@ -725,7 +731,6 @@ def subfunction_loop_for_NVR_avg_update(
     KSP2a,
     w3,
     w2,
-    w1,
     lambda2,
     patch_avg=1,
     soft_thrs=1,
@@ -741,7 +746,8 @@ def subfunction_loop_for_NVR_avg_update(
     if KSP2_weight is None:
         KSP2_weight = np.zeros(KSP2a.shape[:3])
 
-    NOISE_tmp = np.zeros(KSP2a.shape[:3])
+    # Created in MATLAB version but not used
+    # NOISE_tmp = np.zeros(KSP2a.shape[:3])
 
     if KSP2_tmp_update_threshold is None:
         KSP2_tmp_update_threshold = np.zeros(KSP2a.shape[:3])
