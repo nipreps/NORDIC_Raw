@@ -1,5 +1,7 @@
 """Another Python attempt at NORDIC."""
 
+from pathlib import Path
+
 import nibabel as nb
 import numpy as np
 from scipy.signal.windows import tukey
@@ -69,9 +71,10 @@ def run_nordic(
         Default is 2.
 
     """
+    out_dir = Path(out_dir)
+
     ARG = {
         "factor_error": factor_error,
-        "full_dynamic_range": full_dynamic_range,
         "temporal_phase": temporal_phase,
         "algorithm": algorithm,
         "kernel_size_gfactor": kernel_size_gfactor,
@@ -82,16 +85,17 @@ def run_nordic(
         "gfactor_patch_overlap": gfactor_patch_overlap,
         "save_gfactor_map": save_gfactor_map,
         "out_dir": out_dir,
+        "filename": str(out_dir / "out"),
     }
     QQ = {}
 
     mag_img = nb.load(mag_file)
-    mag_data = np.abs(mag_img.get_fdata())
+    mag_data = np.abs(mag_img.get_fdata()).astype(np.float32)
 
     if pha_file:
         has_complex = True
         pha_img = nb.load(pha_file)
-        pha_data = pha_img.get_fdata()
+        pha_data = pha_img.get_fdata().astype(np.float32)
 
         # Scale the phase data to -pi to pi
         phase_range = np.max(pha_data)
@@ -103,13 +107,13 @@ def run_nordic(
     n_noise_volumes = 0
     if mag_norf_file:
         mag_norf_img = nb.load(mag_norf_file)
-        mag_norf_data = mag_norf_img.get_fdata()
+        mag_norf_data = mag_norf_img.get_fdata().astype(np.float32)
         n_noise_volumes = mag_norf_data.shape[3]
         mag_data = np.concatenate((mag_data, mag_norf_data), axis=3)
 
         if has_complex:
             pha_norf_img = nb.load(pha_norf_file)
-            pha_norf_data = pha_norf_img.get_fdata()
+            pha_norf_data = pha_norf_img.get_fdata().astype(np.float32)
             pha_data = np.concatenate((pha_data, pha_norf_data), axis=3)
 
     # Combine magnitude and phase into complex-valued data
@@ -127,7 +131,7 @@ def run_nordic(
 
     # Create a copy of the complex data for processing
     KSP2 = complex_data.copy()
-    matdim = KSP2.shape
+    n_x, n_y, n_slices, n_vols = KSP2.shape
 
     # Create mean 3D array from all non-noise volumes of shape (X, Y, Z)
     meanphase = np.mean(complex_data, axis=3)
@@ -140,9 +144,9 @@ def run_nordic(
     # If the temporal phase is 1 - 3, do a standard low-pass filtered map
     if ARG["temporal_phase"] > 0:
         # Loop over slices backwards
-        for i_slice in range(matdim[2])[::-1]:
+        for i_slice in range(n_slices)[::-1]:
             # Loop over volumes forward, including the noise volumes(???)
-            for j_vol in range(matdim[3]):
+            for j_vol in range(n_vols):
                 # Grab the 2D slice of the 4D array
                 tmp = complex_data[:, :, i_slice, j_vol]
 
@@ -158,7 +162,6 @@ def run_nordic(
                     )
 
                 # Apply Tukey window to the filtered 2D slice
-                n_x, n_y = tmp.shape
                 # TODO: Verify that this works.
                 # tmp = bsxfun(@times,tmp,reshape(tukeywin(n_y,1).^phase_filter_width,[1 n_y]));
                 tukey_window = np.outer(
@@ -186,28 +189,20 @@ def run_nordic(
 
                 DD_phase[:, :, i_slice, j_vol] = tmp
 
-    # Loop over slices backwards
-    # XXX: Do we need this loop? Can't we just directly multiply?
-    for i_slice in range(matdim[2])[::-1]:
-        # Loop over volumes forward, including the noise volumes(???)
-        for j_vol in range(matdim[3]):
-            # Multiply the 4D array by the exponential of the angle of the filtered phase
-            KSP2[:, :, i_slice, j_vol] = KSP2[:, :, i_slice, j_vol] * np.exp(
-                -1j * np.angle(DD_phase[:, :, i_slice, j_vol])
-            )
+    # Multiply the 4D array by the exponential of the angle of the filtered phase
+    KSP2 = KSP2 * np.exp(-1j * np.angle(DD_phase))
 
     print("Completed estimating slice-dependent phases ...")
     if not ARG["kernel_size_gfactor"]:
         # Select first 90 (or fewer, if run is shorter) volumes from 4D array
-        KSP2 = KSP2[:, :, :, : min(90, matdim[3] + 1)]
+        KSP2 = KSP2[:, :, :, : min(90, n_vols + 1)]
     else:
         # Select first N volumes from 4D array, based on kernel_size_gfactor(4)
-        KSP2 = KSP2[:, :, :, : min(ARG["kernel_size_gfactor"][3], matdim[3] + 1)]
+        KSP2 = KSP2[:, :, :, : min(ARG["kernel_size_gfactor"][3], n_vols + 1)]
 
     # Replace NaNs and Infs with zeros
     KSP2[np.isnan(KSP2)] = 0
     KSP2[np.isinf(KSP2)] = 0
-    master_fast = 1
 
     # Preallocate 4D array of zeros
     KSP_recon = np.zeros_like(KSP2)
@@ -215,39 +210,40 @@ def run_nordic(
     if not ARG["kernel_size_gfactor"]:
         ARG["kernel_size"] = [14, 14, 1]
     else:
-        ARG["kernel_size"] = ARG["kernel_size_gfactor"][:3]
+        ARG["kernel_size"] = [int(i) for i in ARG["kernel_size_gfactor"][:3]]
 
-    QQ["KSP_processed"] = np.zeros((1, matdim[0] - ARG["kernel_size"][0]))
-    ARG["patch_average"] = 0
+    n_patches = n_x - ARG["kernel_size"][0]
+    QQ["KSP_processed"] = np.zeros(n_patches, dtype=int)
+    ARG["patch_average"] = False
     ARG["patch_average_sub"] = ARG["gfactor_patch_overlap"]
-
     ARG["LLR_scale"] = 0
     ARG["NVR_threshold"] = 1
     ARG["soft_thrs"] = 10  # MPPCa   (When Noise varies)
     # ARG['soft_thrs'] = []  # NORDIC (When noise is flat)
 
     # Preallocate 3D arrays of zeros
-    KSP_weight = np.zeros((matdim[0], matdim[1], matdim[2]))
+    KSP_weight = np.zeros((n_x, n_y, n_slices))
     NOISE = np.zeros_like(KSP_weight)
     Component_threshold = np.zeros_like(KSP_weight)
     energy_removed = np.zeros_like(KSP_weight)
     SNR_weight = np.zeros_like(KSP_weight)
     # The original code re-creates KSP_processed here for no reason
 
-    # patch_average is hardcoded as 0 so this block is always executed.
-    if ARG["patch_average"] == 0:
+    # patch_average is hardcoded as False so this block is always executed.
+    if not ARG["patch_average"]:
         KSP_processed = QQ["KSP_processed"] * 0  # pointless
         # WTAF is this loop doing?
-        val = max(1, np.floor(ARG["kernel_size"][0] / ARG["patch_average_sub"]))
+        val = int(max(1, int(np.floor(ARG["kernel_size"][0] / ARG["patch_average_sub"]))))
         for nw1 in range(1, val):
             # KSP_processed(1,nw1 : max(1,floor(ARG.ARG['kernel_size'](1)/ARG.patch_average_sub)):end)=2;
-            KSP_processed[0, nw1:val:] = 2
+            KSP_processed[nw1:val:] = 2
         KSP_processed[-1] = 0
         QQ["KSP_processed"] = KSP_processed
 
     print("Estimating g-factor")
     QQ["ARG"] = ARG
-    for n1 in range(QQ["KSP_processed"].shape[1]):
+    master_fast = 1
+    for i_patch in range(n_patches):
         (
             KSP_recon,
             _,
@@ -260,7 +256,7 @@ def run_nordic(
             KSP_recon=KSP_recon,
             KSP2=KSP2,
             ARG=ARG,
-            n1=n1,
+            patch_num=i_patch,
             QQ=QQ,
             master=master_fast,
             KSP2_weight=KSP_weight,
@@ -280,7 +276,7 @@ def run_nordic(
     print("completed estimating g-factor")
     gfactor = ARG["NOISE"]
 
-    if KSP2.shape[3] < 6:
+    if n_vols < 6:
         gfactor[np.isnan(gfactor)] = 0
         gfactor[gfactor == 0] = np.median(gfactor[gfactor != 0])
 
@@ -304,7 +300,7 @@ def run_nordic(
             2 * tmp[int(np.round(0.99 * len(tmp))) - 1]
         )  # added -1 to match MATLAB indexing
         gain_level = np.floor(np.log2(32000 / sn_scale))
-        if not ARG["full_dynamic_range"]:
+        if not full_dynamic_range:
             gain_level = 0
 
         gfactor_for_img = np.abs(gfactor_for_img) * (2**gain_level)
@@ -312,24 +308,18 @@ def run_nordic(
         gfactor_img.to_filename(out_dir / "gfactor.nii.gz")
 
     KSP2 = complex_data.copy()
-    matdim = KSP2.shape
+    n_x, n_y, n_slices, n_vols = KSP2.shape
 
-    for i_slice in range(matdim[2])[::-1]:
-        for j_vol in range(matdim[3]):  # include the noise
-            KSP2[:, :, i_slice, j_vol] = KSP2[:, :, i_slice, j_vol] * np.exp(
-                -1j * np.angle(meanphase[:, :, i_slice])
-            )
-
-    for j_vol in range(matdim[3]):
-        KSP2[:, :, :, j_vol] = KSP2[:, :, :, j_vol] / gfactor
+    KSP2 = KSP2 * np.exp(-1j * np.angle(meanphase[..., None]))
+    KSP2 = KSP2 / gfactor[..., None]
 
     if n_noise_volumes > 0:
         KSP2_NOISE = KSP2[..., -n_noise_volumes:]
 
     if ARG["temporal_phase"] == 3:
         # Secondary step for filtered phase with residual spikes
-        for i_slice in range(matdim[2])[::-1]:
-            for j_vol in range(matdim[3]):
+        for i_slice in range(n_slices)[::-1]:
+            for j_vol in range(n_vols):
                 phase_diff = np.angle(
                     KSP2[:, :, i_slice, j_vol] / DD_phase[:, :, i_slice, j_vol]
                 )
@@ -340,12 +330,7 @@ def run_nordic(
                 DD_phase2[mask * mask2] = tmp[mask * mask2]
                 DD_phase[:, :, i_slice, j_vol] = DD_phase2
 
-    for i_slice in range(matdim[2])[::-1]:
-        for j_vol in range(matdim[3]):
-            KSP2[:, :, i_slice, j_vol] = KSP2[:, :, i_slice, j_vol] * np.exp(
-                -1j * np.angle(DD_phase[:, :, i_slice, j_vol])
-            )
-
+    KSP2 = KSP2 * np.exp(-1j * np.angle(DD_phase))
     KSP2[np.isnan(KSP2)] = 0
     KSP2[np.isinf(KSP2)] = 0
 
@@ -364,7 +349,7 @@ def run_nordic(
     if ARG["data_has_zero_elements"]:
         MASK = np.sum(np.abs(KSP2), axis=3) == 0
         num_zero_elements = np.sum(MASK)
-        for i_vol in range(matdim[3]):
+        for i_vol in range(n_vols):
             tmp = KSP2[:, :, :, i_vol]
             tmp[MASK] = (
                 np.random.normal(size=num_zero_elements)
@@ -372,31 +357,30 @@ def run_nordic(
             ) / np.sqrt(2)
             KSP2[:, :, :, i_vol] = tmp
 
-    master_fast = 1
     KSP_recon = np.zeros_like(KSP2)
-    ARG["kernel_size"] = np.full((1, 3), int(np.round(np.cbrt(KSP2.shape[3] * 11))))
+    ARG["kernel_size"] = np.ones(3, dtype=int) * int(np.round(np.cbrt(n_vols * 11)))
     if ARG["kernel_size_PCA"]:
-        ARG["kernel_size"] = ARG["kernel_size_PCA"]
+        ARG["kernel_size"] = [int(i) for i in ARG["kernel_size_PCA"]]
+        raise Exception(f'{ARG["kernel_size_PCA"]}\n\n{ARG["kernel_size"]}')
 
-    if matdim[2] <= ARG["kernel_size"][2]:  # Number of slices is less than cubic kernel
-        ARG["kernel_size"] = np.full(
-            (1, 3), int(np.round(np.sqrt(KSP2.shape[3] * 11 / matdim[2])))
+    if n_slices <= ARG["kernel_size"][2]:  # Number of slices is less than cubic kernel
+        ARG["kernel_size"] = (
+            np.ones(3, dtype=int) * int(np.round(np.sqrt(n_vols * 11 / n_slices)))
         )
-        ARG["kernel_size"][2] = matdim[2]
+        ARG["kernel_size"][2] = n_slices
 
-    QQ["KSP_processed"] = np.zeros((1, KSP2.shape[0] - ARG["kernel_size"][0]))
-    ARG["patch_average"] = 0
+    ARG["patch_average"] = False
     ARG["patch_average_sub"] = ARG["NORDIC_patch_overlap"]
     ARG["LLR_scale"] = 1
     ARG["NVR_threshold"] = 0
-    ARG["soft_thrs"] = []  # NORDIC (When noise is flat)
+    ARG["soft_thrs"] = None  # NORDIC (When noise is flat)
     ARG["NVR_threshold"] = 0  # for no reason
 
-    for _ in range(1, 11):
+    for _ in range(10):
         _, S, _ = np.linalg.svd(
-            np.random.normal(size=(np.prod(ARG["kernel_size"]), KSP2.shape[3]))
+            np.random.normal(size=(np.prod(ARG["kernel_size"]), n_vols))
         )
-        ARG["NVR_threshold"] = ARG["NVR_threshold"] + S[1]
+        ARG["NVR_threshold"] = ARG["NVR_threshold"] + S[0]
 
     # XXX: This divides by 10, but multiplies by the others. Is that expected?
     if has_complex:
@@ -421,19 +405,22 @@ def run_nordic(
     Component_threshold = KSP_weight.copy()
     energy_removed = KSP_weight.copy()
     SNR_weight = KSP_weight.copy()
-    QQ["KSP_processed"] = np.zeros((1, KSP2.shape[0] - ARG["kernel_size"][0]))
 
-    if ARG["patch_average"] == 0:
+    n_patches = n_x - ARG["kernel_size"][0]
+    QQ["KSP_processed"] = np.zeros(n_patches, dtype=int)
+
+    if not ARG["patch_average"]:
         KSP_processed = QQ["KSP_processed"] * 0
-        val = max(1, np.floor(ARG["kernel_size"][0] / ARG["patch_average_sub"]))
+        val = max(1, int(np.floor(ARG["kernel_size"][0] / ARG["patch_average_sub"])))
         for nw1 in range(1, val):
-            KSP_processed[0, nw1:val:] = 2
+            KSP_processed[nw1:val:] = 2
         KSP_processed[-1] = 0
         QQ["KSP_processed"] = KSP_processed
 
     print("Starting NORDIC")
     QQ["ARG"] = ARG
-    for n1 in range(QQ["KSP_processed"].shape[1]):
+    master_fast = 1
+    for i_patch in range(n_patches):
         (
             KSP_recon,
             _,
@@ -446,7 +433,7 @@ def run_nordic(
             KSP_recon=KSP_recon,
             KSP2=KSP2,
             ARG=ARG,
-            n1=n1,
+            patch_num=i_patch,
             QQ=QQ,
             master=master_fast,
             KSP2_weight=KSP_weight,
@@ -466,29 +453,29 @@ def run_nordic(
     print("Completing NORDIC")
 
     residual = KSP2 - KSP_recon
-    residual_img = nb.Nifti1Image(residual, mag_img.affine, mag_img.header)
-    residual_img.to_filename(out_dir / "residual.nii.gz")
+    # Split residuals into magnitude and phase
+    residual_magn = np.abs(residual)
+    residual_phase = np.angle(residual)
+    residual_magn_img = nb.Nifti1Image(residual_magn, mag_img.affine, mag_img.header)
+    residual_magn_img.to_filename(out_dir / "residual_magn.nii.gz")
+    residual_phase_img = nb.Nifti1Image(residual_phase, mag_img.affine, mag_img.header)
+    residual_phase_img.to_filename(out_dir / "residual_phase.nii.gz")
+    del residual, residual_magn, residual_phase
+    del residual_magn_img, residual_phase_img
 
-    for i_vol in range(matdim[3]):
-        IMG2[:, :, :, i_vol] = IMG2[:, :, :, i_vol] * gfactor
-
-    for i_slice in range(matdim[2])[::-1]:
-        for j_vol in range(matdim[3]):
-            IMG2[:, :, i_slice, j_vol] = IMG2[:, :, i_slice, j_vol] * np.exp(
-                1j * np.angle(DD_phase[:, :, i_slice])
-            )
-
+    IMG2 = IMG2 * gfactor[:, :, :, None]
+    IMG2 *= np.exp(1j * np.angle(DD_phase))
     IMG2 = IMG2 * ARG["ABSOLUTE_SCALE"]
     IMG2[np.isnan(IMG2)] = 0
 
-    if ARG["make_complex_nii"]:
+    if has_complex:
         IMG2_tmp = np.abs(IMG2)  # remove g-factor and noise for DUAL 1
         IMG2_tmp[np.isnan(IMG2_tmp)] = 0
         tmp = np.sort(np.abs(IMG2_tmp.flatten()))
         sn_scale = 2 * tmp[int(np.round(0.99 * len(tmp))) - 1]
         gain_level = np.floor(np.log2(32000 / sn_scale))
 
-        if not ARG["full_dynamic_range"]:
+        if not full_dynamic_range:
             gain_level = 0
 
         IMG2_tmp = np.abs(IMG2_tmp) * (2**gain_level)
@@ -506,19 +493,21 @@ def run_nordic(
         sn_scale = 2 * tmp[int(np.round(0.99 * len(tmp))) - 1]
         gain_level = np.floor(np.log2(32000 / sn_scale))
 
-        if not ARG["full_dynamic_range"]:
+        if not full_dynamic_range:
             gain_level = 0
 
         IMG2 = np.abs(IMG2) * (2**gain_level)
         IMG2_img = nb.Nifti1Image(IMG2, mag_img.affine, mag_img.header)
         IMG2_img.to_filename(out_dir / "magn.nii.gz")
 
+    print("Done!")
+
 
 def sub_LLR_Processing(
     KSP_recon,
     KSP2,
     ARG,
-    n1,
+    patch_num,
     QQ,
     master,
     KSP2_weight,
@@ -527,54 +516,74 @@ def sub_LLR_Processing(
     energy_removed=None,
     SNR_weight=None,
 ):
-    """Do something."""
+    """Do something.
+
+    Parameters
+    ----------
+    KSP_recon : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    KSP2 : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    ARG : dict
+        A dictionary of arguments. I will break this up into individual variables later.
+    patch_num : int
+        Patch number. Each patch is processed separately.
+    QQ : dict
+        A dictionary of arguments. I will break this up into individual variables later.
+    master : int
+    KSP2_weight : np.ndarray of shape (n_x, n_y, n_slices)
+    NOISE : np.ndarray of shape (n_x, n_y, n_slices)
+    Component_threshold : np.ndarray of shape (n_x, n_y, n_slices)
+    energy_removed : np.ndarray of shape (n_x, n_y, n_slices)
+    SNR_weight : np.ndarray of shape (n_x, n_y, n_slices)
+
+    Returns
+    -------
+    KSP_recon : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    KSP2 : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    KSP2_weight : np.ndarray of shape (n_x, n_y, n_slices)
+    NOISE : np.ndarray of shape (n_x, n_y, n_slices)
+    Component_threshold : np.ndarray of shape (n_x, n_y, n_slices)
+    energy_removed : np.ndarray of shape (n_x, n_y, n_slices)
+    SNR_weight : np.ndarray of shape (n_x, n_y, n_slices)
+    """
     import pickle
     import os
 
-    slice_idx = np.arange(0, ARG["kernel_size"][0]) + (n1 - 1)
-
-    # Unused nonsense
-    if master == 0 and ARG["patch_average"] == 0:
-        OPTION = "NO_master_NO_PA"
-    elif master == 0 and ARG["patch_average"] == 1:
-        OPTION = "NO_master_PA"
-    elif master == 1 and ARG["patch_average"] == 0:
-        OPTION = "master_NO_PA"
-    else:
-        OPTION = "master_PA"
+    _, n_y, _, _ = KSP2.shape
+    patch_idx = np.arange(0, ARG["kernel_size"][0], dtype=int) + (patch_num - 1)
 
     # not being processed also not completed yet
-    if QQ["KSP_processed"][0, n1] != 1 and QQ["KSP_processed"][0, n1] != 3:
+    # DATA_full2 is (patch_size, n_y, n_z, n_vols)
+    DATA_full2 = None
+    if QQ["KSP_processed"][patch_num] not in (1, 3):
         # processed but not added
-        if QQ["KSP_processed"][0, n1] == 2 and master == 1:
-            DATA_full2 = None
-
+        if QQ["KSP_processed"][patch_num] == 2 and master == 1:
             # loading instead of processing
             # load file as soon as save, if more than 10 sec, just do the recon instead.
-            data_file = ARG["filename"] + "slice" + str(n1) + ".pkl"
+            data_file = f'{ARG["filename"]}slice{patch_num}.pkl'
             # if file doesn't exist go to next slice
             if not os.path.isfile(data_file):
-                QQ["KSP_processed"][0, n1] = 0  # identified as bad file and being identified for reprocessing
+                # identified as bad file and being identified for reprocessing
+                QQ["KSP_processed"][patch_num] = 0
             else:
                 with open(data_file, "rb") as f:
                     DATA_full2 = pickle.load(f)
 
-        if QQ["KSP_processed"][0, n1] != 2:
+        if QQ["KSP_processed"][patch_num] != 2:
             # block for other processes
-            QQ["KSP_processed"][0, n1] = 1
+            QQ["KSP_processed"][patch_num] = 1
             if DATA_full2 is None:
                 ARG2 = QQ["ARG"]
                 if master == 0:
-                    QQ["KSP_processed"][0, n1] = 1  # STARTING
+                    QQ["KSP_processed"][patch_num] = 1  # STARTING
                     # TODO: Check the index here
-                    KSP2a = QQ["KSP2"][slice_idx, :, :, :]
+                    KSP2a = QQ["KSP2"][patch_idx, :, :, :]
                     lambda_ = ARG2["LLR_scale"] * ARG["NVR_threshold"]
                 else:
-                    QQ["KSP_processed"][0, n1] = 1  # STARTING
-                    KSP2a = KSP2[slice_idx, :, :, :]
+                    QQ["KSP_processed"][patch_num] = 1  # STARTING
+                    KSP2a = KSP2[patch_idx, :, :, :]
                     lambda_ = ARG2["LLR_scale"] * ARG["NVR_threshold"]
 
-                if ARG["patch_average"] == 1:
+                if ARG["patch_average"]:
                     DATA_full2, KSP2_weight = subfunction_loop_for_NVR_avg(
                         KSP2a=KSP2a,
                         w3=ARG["kernel_size"][2],
@@ -584,11 +593,11 @@ def sub_LLR_Processing(
                         KSP2_weight=KSP2_weight,
                     )
                 else:
-                    KSP2_weight_tmp = KSP2_weight[slice_idx, :, :]
-                    NOISE_tmp = NOISE[slice_idx, :, :]
-                    Component_threshold_tmp = Component_threshold[slice_idx, :, :]
-                    energy_removed_tmp = energy_removed[slice_idx, :, :]
-                    SNR_weight_tmp = SNR_weight[slice_idx, :, :]
+                    KSP2_weight_tmp = KSP2_weight[patch_idx, :, :]
+                    NOISE_tmp = NOISE[patch_idx, :, :]
+                    Component_threshold_tmp = Component_threshold[patch_idx, :, :]
+                    energy_removed_tmp = energy_removed[patch_idx, :, :]
+                    SNR_weight_tmp = SNR_weight[patch_idx, :, :]
 
                     (
                         DATA_full2,
@@ -602,7 +611,7 @@ def sub_LLR_Processing(
                         w3=ARG["kernel_size"][2],
                         w2=ARG["kernel_size"][1],
                         lambda2=lambda_,
-                        patch_avg=1,
+                        patch_avg=True,
                         soft_thrs=ARG["soft_thrs"],
                         KSP2_weight=KSP2_weight_tmp,
                         ARG=ARG,
@@ -612,32 +621,25 @@ def sub_LLR_Processing(
                         SNR_weight=SNR_weight_tmp,
                     )
 
-                    KSP2_weight[slice_idx, :, :] = KSP2_weight_tmp
-                    try:
-                        NOISE[slice_idx, :, :] = NOISE_tmp
-                    except:
-                        print("WTF happened?")
-
-                    Component_threshold[slice_idx, :, :] = Component_threshold_tmp
-                    energy_removed[slice_idx, :, :] = energy_removed_tmp
-                    SNR_weight[slice_idx, :, :] = SNR_weight_tmp
+                    KSP2_weight[patch_idx, :, :] = KSP2_weight_tmp
+                    NOISE[patch_idx, :, :] = NOISE_tmp
+                    Component_threshold[patch_idx, :, :] = Component_threshold_tmp
+                    energy_removed[patch_idx, :, :] = energy_removed_tmp
+                    SNR_weight[patch_idx, :, :] = SNR_weight_tmp
 
         if master == 0:
-            if QQ["KSP_processed"][0, n1] != 2:
-                data_file = ARG["filename"] + "slice" + str(n1) + ".pkl"
+            if QQ["KSP_processed"][patch_num] != 2:
+                data_file = f'{ARG["filename"]}slice{patch_num}.pkl'
                 with open(data_file, "wb") as f:
                     pickle.dump(DATA_full2, f)
-                QQ["KSP_processed"][0, n1] = 2  # COMPLETED
+                QQ["KSP_processed"][patch_num] = 2  # COMPLETED
         else:
-            if ARG["patch_average"] == 1:
-                tmp = KSP_recon[slice_idx, ...]
-                KSP_recon[slice_idx, ...] = tmp + DATA_full2
+            if ARG["patch_average"]:
+                KSP_recon[patch_idx, ...] += DATA_full2
             else:
-                KSP_recon[slice_idx, : DATA_full2.shape[1], ...] = (
-                    KSP_recon[slice_idx, : DATA_full2.shape[1], ...] + DATA_full2
-                )
+                KSP_recon[patch_idx, : n_y, ...] += DATA_full2
 
-            QQ["KSP_processed"][0, n1] = 3
+            QQ["KSP_processed"][patch_num] = 3
 
     return (
         KSP_recon,
@@ -651,27 +653,32 @@ def sub_LLR_Processing(
 
 
 def subfunction_loop_for_NVR_avg(
-    KSP2a, w3, w2, lambda2, patch_avg=1, soft_thrs=None, KSP2_weight=None, ARG=None
+    KSP2a, w3, w2, lambda2, patch_avg=True, soft_thrs=None, KSP2_weight=None, ARG=None
 ):
     """Do something."""
-
     if KSP2_weight is None:
         KSP2_weight = np.zeros(KSP2a.shape[:3])
 
     KSP2_tmp_update = np.zeros(KSP2a.shape)
+    sigmasq_2 = None
 
-    # TODO: Make sense of whatever this loop is.
-    # XXX: 10 is a stand-in. Need to get the real logic implemented.
-    for n2 in range(10):
-        w2_slice = np.arange(w2) + (n2 - 1)
-        for n3 in range(10):
-            w3_slice = np.arange(w3) + (n3 - 1)
-            KSP2_tmp = KSP2a[:, w2_slice, w3_slice, :]
-            tmp1 = np.reshape(KSP2_tmp, [], KSP2_tmp.shape[3])
+    spacing = max(1, int(np.floor(w2 / ARG["patch_average_sub"])))
+    last = KSP2a.shape[1] - w2 + 1
+    n2_range = list(np.arange(0, last, spacing, dtype=int))
+    for n2 in n2_range:
+        w2_slice = np.arange(w2, dtype=int) + n2
+        spacing = max(1, int(np.floor(w3 / ARG["patch_average_sub"])))
+        last = KSP2a.shape[2] - w3 + 1
+        n3_range = list(np.arange(0, last, spacing, dtype=int))
+        for n3 in n3_range:
+            w3_slice = np.arange(w3, dtype=int) + n3
+            KSP2_tmp = KSP2a[:, w2_slice, :, :]
+            KSP2_tmp = KSP2_tmp[:, :, w3_slice, :]
+            tmp1 = np.reshape(KSP2_tmp, (np.prod(KSP2_tmp.shape[:3]), KSP2_tmp.shape[3]))
 
             # svd(tmp1, 'econ') in MATLAB
+            # S is 1D in Python, 2D diagonal matrix in MATLAB
             U, S, V = np.linalg.svd(tmp1, full_matrices=False)
-            S = np.diag(S)
 
             idx = np.sum(S < lambda2)
             if soft_thrs is None:
@@ -681,48 +688,44 @@ def subfunction_loop_for_NVR_avg(
                 MM = tmp1.shape[0]
                 NNN = tmp1.shape[1]
                 R = np.min((MM, NNN))
-                scaling = (np.max((MM, NNN)) - np.arange(R - centering - 1)) / NNN
+                scaling = (np.max((MM, NNN)) - np.arange(R - centering, dtype=int)) / NNN
                 vals = S
                 vals = (vals**2) / NNN
 
                 # First estimation of Sigma^2;  Eq 1 from ISMRM presentation
-                csum = np.cumsum(vals[R - centering : -1 : 1])
-                cmean = csum[R - centering : -1 : 1] / np.arange(R - centering, -1, 1)
+                csum = np.cumsum(vals[::-1][:R - centering])
+                cmean = csum[::-1][:R - centering] / np.arange(R - centering, dtype=int)[::-1]
                 sigmasq_1 = cmean / scaling
 
                 # Second estimation of Sigma^2; Eq 2 from ISMRM presentation
-                gamma = (MM - np.arange(0, R - centering - 1)) / NNN
+                gamma = (MM - np.arange(R - centering, dtype=int)) / NNN
                 rangeMP = 4 * np.sqrt(gamma)
-                rangeData = vals[: R - centering] - vals[R - centering]
+                rangeData = vals[: R - centering + 1] - vals[R - centering - 1]
                 sigmasq_2 = rangeData / rangeMP
                 t = np.where(sigmasq_2 < sigmasq_1)[0][0]
                 S[t:] = 0
             else:
-                S[np.max((1, S.shape[0] - np.floor(idx * soft_thrs))) :] = 0
+                S[np.max((1, S.shape[0] - int(np.floor(idx * soft_thrs)))) :] = 0
 
             tmp1 = np.dot(np.dot(U, np.diag(S)), V.T)
             tmp1 = np.reshape(tmp1, KSP2_tmp.shape)
 
-            if patch_avg == 1:
-                KSP2_tmp_update[:, w2_slice, w3_slice, :] = (
-                    KSP2_tmp_update[:, w2_slice, w3_slice, :] + tmp1
-                )
-                KSP2_weight[:, w2_slice, w3_slice] = (
-                    KSP2_weight[:, w2_slice, w3_slice] + 1
-                )
+            if patch_avg:
+                # Use np.ix_ to create a broadcastable indexing array
+                w2_slicex, w3_slicex = np.ix_(w2_slice, w3_slice)
+
+                KSP2_tmp_update[:, w2_slicex, w3_slicex, :] += tmp1
+                KSP2_weight[:, w2_slicex, w3_slicex] += 1
             else:
                 w2_tmp = int(np.round(w2 / 2)) + (n2 - 1)
                 w3_tmp = int(np.round(w3 / 2)) + (n3 - 1)
-                KSP2_tmp_update[:, w2_tmp, w3_tmp, :] = (
-                    KSP2_tmp_update[:, w2_tmp, w3_tmp, :]
-                    + tmp1[
-                        0,
-                        int(np.round(tmp1.shape[1] / 2)),
-                        int(np.round(tmp1.shape[2] / 2)),
-                        :,
-                    ]
-                )
-                KSP2_weight[:, w2_tmp, w3_tmp] = KSP2_weight[:, w2_tmp, w3_tmp] + 1
+                KSP2_tmp_update[:, w2_tmp, w3_tmp, :] += tmp1[
+                    0,
+                    int(np.round(tmp1.shape[1] / 2)),
+                    int(np.round(tmp1.shape[2] / 2)),
+                    :,
+                ]
+                KSP2_weight[:, w2_tmp, w3_tmp] += 1
 
     return KSP2_tmp_update, KSP2_weight
 
@@ -732,7 +735,7 @@ def subfunction_loop_for_NVR_avg_update(
     w3,
     w2,
     lambda2,
-    patch_avg=1,
+    patch_avg=True,
     soft_thrs=1,
     KSP2_weight=None,
     ARG=None,
@@ -748,9 +751,10 @@ def subfunction_loop_for_NVR_avg_update(
 
     # Created in MATLAB version but not used
     # NOISE_tmp = np.zeros(KSP2a.shape[:3])
+    sigmasq_2 = None
 
     if KSP2_tmp_update_threshold is None:
-        KSP2_tmp_update_threshold = np.zeros(KSP2a.shape[:3])
+        KSP2_tmp_update_threshold = np.zeros(KSP2a.shape[:3], dtype=KSP2a.dtype)
 
     if energy_removed is None:
         energy_removed = np.zeros(KSP2a.shape[:3])
@@ -758,19 +762,23 @@ def subfunction_loop_for_NVR_avg_update(
     if SNR_weight is None:
         SNR_weight = np.zeros(KSP2a.shape[:3])
 
-    KSP2_tmp_update = np.zeros(KSP2a.shape)
+    KSP2_tmp_update = np.zeros_like(KSP2a)
 
-    # TODO: Make sense of whatever this loop is.
-    # XXX: 10 is a stand-in. Need to get the real logic implemented.
-    for n2 in range(10):
-        w2_slice = np.arange(w2) + (n2 - 1)
-        for n3 in range(10):
-            w3_slice = np.arange(w3) + (n3 - 1)
-            KSP2_tmp = KSP2a[:, w2_slice, w3_slice, :]
-            tmp1 = np.reshape(KSP2_tmp, [], KSP2_tmp.shape[3])
+    spacing = max(1, int(np.floor(w2 / ARG["patch_average_sub"])))
+    last = KSP2a.shape[1] - w2 + 1
+    n2_range = list(np.arange(0, last, spacing, dtype=int))
+    for n2 in n2_range:
+        w2_slice = np.arange(w2, dtype=int) + n2
+        spacing = max(1, int(np.floor(w3 / ARG["patch_average_sub"])))
+        last = KSP2a.shape[2] - w3 + 1
+        n3_range = list(np.arange(0, last, spacing, dtype=int))
+        for n3 in n3_range:
+            w3_slice = np.arange(w3, dtype=int) + n3
+            KSP2_tmp = KSP2a[:, w2_slice, :, :]
+            KSP2_tmp = KSP2_tmp[:, :, w3_slice, :]
+            tmp1 = np.reshape(KSP2_tmp, (np.prod(KSP2_tmp.shape[:3]), KSP2_tmp.shape[3]))
 
             U, S, V = np.linalg.svd(tmp1, full_matrices=False)
-            S = np.diag(S)
 
             idx = np.sum(S < lambda2)
             if soft_thrs is None:
@@ -790,20 +798,18 @@ def subfunction_loop_for_NVR_avg_update(
                 if MM > 0:
                     NNN = tmp1.shape[1]
                     R = np.min((MM, NNN))
-                    scaling = (np.max((MM, NNN)) - np.arange(R - centering - 1)) / NNN
-                    scaling = np.flatten(scaling)
-                    vals = S
+                    scaling = (np.max((MM, NNN)) - np.arange(R - centering, dtype=int)) / NNN
+                    scaling = scaling.flatten()
+                    vals = S.copy()
                     vals = (vals**2) / NNN
                     # First estimation of Sigma^2;  Eq 1 from ISMRM presentation
-                    csum = np.cumsum(vals[R - centering : -1 : 1])
-                    cmean = csum[R - centering : -1 : 1] / np.arange(
-                        R - centering, -1, 1
-                    )
+                    csum = np.cumsum(vals[::-1][:R - centering])
+                    cmean = csum[::-1][:R - centering] / np.arange(R - centering, dtype=int)[::-1]
                     sigmasq_1 = cmean / scaling
                     # Second estimation of Sigma^2; Eq 2 from ISMRM presentation
-                    gamma = (MM - np.arange(0, R - centering - 1)) / NNN
+                    gamma = (MM - np.arange(R - centering, dtype=int)) / NNN
                     rangeMP = 4 * np.sqrt(gamma)
-                    rangeData = vals[: R - centering] - vals[R - centering]
+                    rangeData = vals[: R - centering + 1] - vals[R - centering - 1]
                     sigmasq_2 = rangeData / rangeMP
                     t = np.where(sigmasq_2 < sigmasq_1)[0][0]
                     idx = S[t:].shape[0]
@@ -815,7 +821,7 @@ def subfunction_loop_for_NVR_avg_update(
                     sigmasq_2 = 0
 
             else:  # SHOULD BE UNREACHABLE
-                S[np.max((1, S.shape[0] - np.floor(idx * soft_thrs))) :] = 0
+                S[np.max((1, S.shape[0] - int(np.floor(idx * soft_thrs)))) :] = 0
 
             tmp1 = np.dot(np.dot(U, np.diag(S)), V.T)
             tmp1 = np.reshape(tmp1, KSP2_tmp.shape)
@@ -826,37 +832,24 @@ def subfunction_loop_for_NVR_avg_update(
             if t is None:
                 t = 1
 
-            if patch_avg == 1:
-                KSP2_tmp_update[:, w2_slice, w3_slice, :] = KSP2_tmp_update[
-                    :, w2_slice, w3_slice, :
-                ] + (patch_scale * tmp1)
-                KSP2_weight[:, w2_slice, w3_slice] = (
-                    KSP2_weight[:, w2_slice, w3_slice] + patch_scale
+            if patch_avg:
+                # Use np.ix_ to create a broadcastable indexing array
+                w2_slicex, w3_slicex = np.ix_(w2_slice, w3_slice)
+                KSP2_tmp_update[:, w2_slicex, w3_slicex, :] = (
+                    KSP2_tmp_update[:, w2_slicex, w3_slicex, :] + (patch_scale * tmp1)
                 )
-                KSP2_tmp_update_threshold[:, w2_slice, w3_slice, :] = (
-                    KSP2_tmp_update_threshold[:, w2_slice, w3_slice, :] + idx
-                )
-                energy_removed[:, w2_slice, w3_slice] = (
-                    energy_removed[:, w2_slice, w3_slice] + energy_scrub
-                )
-                SNR_weight[:, w2_slice, w3_slice] = SNR_weight[
-                    :, w2_slice, w3_slice
-                ] + (S[0] / S[max(1, t - 1)])
-
-                try:
-                    NOISE[: KSP2a.shape[0], w2_slice, w3_slice] = (
-                        NOISE[: KSP2a.shape[0], w2_slice, w3_slice] + sigmasq_2[t]
-                    )
-                except:
-                    print("WTF happened?")
+                KSP2_weight[:, w2_slicex, w3_slicex] += patch_scale
+                KSP2_tmp_update_threshold[:, w2_slicex, w3_slicex] += idx
+                energy_removed[:, w2_slicex, w3_slicex] += energy_scrub
+                SNR_weight[:, w2_slicex, w3_slicex] += S[0] / S[max(1, t - 1)]
+                if sigmasq_2 is not None:
+                    NOISE[: KSP2a.shape[0], w2_slicex, w3_slicex] += sigmasq_2[t]
 
             else:
-                w2_tmp = int(np.round(w2 / 2)) + (n2 - 1)
-                w3_tmp = int(np.round(w3 / 2)) + (n3 - 1)
+                w2_tmp = int(np.round(w2 / 2)) + n2
+                w3_tmp = int(np.round(w3 / 2)) + n3
 
-                KSP2_tmp_update[:, w2_tmp, w3_tmp, :] = KSP2_tmp_update[
-                    :, w2_tmp, w3_tmp, :
-                ] + (
+                KSP2_tmp_update[:, w2_tmp, w3_tmp, :] += (
                     patch_scale
                     * tmp1[
                         0,
@@ -865,23 +858,12 @@ def subfunction_loop_for_NVR_avg_update(
                         :,
                     ]
                 )
-                KSP2_weight[:, w2_tmp, w3_tmp] = (
-                    KSP2_weight[:, w2_tmp, w3_tmp] + patch_scale
-                )
-                KSP2_tmp_update_threshold[:, w2_tmp, w3_tmp, :] = (
-                    KSP2_tmp_update_threshold[:, w2_tmp, w3_tmp, :] + idx
-                )
-                energy_removed[:, w2_tmp, w3_tmp] = (
-                    energy_removed[:, w2_tmp, w3_tmp] + energy_scrub
-                )
-                SNR_weight[:, w2_tmp, w3_tmp] = SNR_weight[:, w2_tmp, w3_tmp] + (
-                    S[0] / S[max(1, t - 1)]
-                )
-
-                try:
-                    NOISE[:, w2_tmp, w3_tmp] = NOISE[:, w2_tmp, w3_tmp] + sigmasq_2[t]
-                except:
-                    print("WTF happened?")
+                KSP2_weight[:, w2_tmp, w3_tmp] += patch_scale
+                KSP2_tmp_update_threshold[:, w2_tmp, w3_tmp, :] += idx
+                energy_removed[:, w2_tmp, w3_tmp] += energy_scrub
+                SNR_weight[:, w2_tmp, w3_tmp] += S[0] / S[max(1, t - 1)]
+                if sigmasq_2 is not None:
+                    NOISE[:, w2_tmp, w3_tmp] += sigmasq_2[t]
 
     return (
         KSP2_tmp_update,
