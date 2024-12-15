@@ -529,18 +529,15 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
     end
 
     if ARG.noise_volume_last>0
+        % BUG: Only grabs first noise volume, not all noise volumes
         KSP2_NOISE =KSP2(:,:,:,end+1-ARG.noise_volume_last);
     end
 
-
-
-
-    if           ARG.temporal_phase==3; % Secondary step for filtered phase with residual spikes
+    if ARG.temporal_phase==3; % Secondary step for filtered phase with residual spikes
         for slice=matdim(3):-1:1
             for n=1:size(KSP2,4);
-
-                phase_diff=angle(KSP2(:,:,slice,n)./DD_phase(:,:,slice,n));
-                mask  = abs(phase_diff)>1;
+                phase_diff = angle(KSP2(:,:,slice,n)./DD_phase(:,:,slice,n));
+                mask = abs(phase_diff)>1;
                 mask2 = abs(KSP2(:,:,slice,n))>sqrt(2);
                 DD_phase2=DD_phase(:,:,slice,n);
                 tmp=(KSP2(:,:,slice,n));
@@ -954,12 +951,17 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
     for n2=[1: max(1,floor(w2/ARG.patch_average_sub)):size(KSP2a,2)*1-w2+1  size(KSP2a,2)-w2+1];
         for n3=[1: max(1,floor(w3/ARG.patch_average_sub)):size(KSP2a,3)*1-w3+1  size(KSP2a,3)-w3+1  ];
 
+            % 14x14x1x13 array
             KSP2_tmp=KSP2a(:,[1:w2]+(n2-1),[1:w3]+(n3-1),:);
+            % (14*14*1)x13 array = 196x13 array
             tmp1=reshape(KSP2_tmp,[],size(KSP2_tmp,4));
 
             [U,S,V]=svd([(tmp1) ],'econ');
+            % U = 196x13
+            % S = 13x13
+            % V = 13x13
             S=diag(S);
-
+            % S = 13x1
 
 
 
@@ -982,13 +984,21 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
                 vals=S;
                 vals = (vals).^2 / NNN;
                 % First estimation of Sigma^2;  Eq 1 from ISMRM presentation
-                csum = cumsum(vals(R-centering:-1:1)); cmean = csum(R-centering:-1:1)./(R-centering:-1:1)'; sigmasq_1 = cmean./scaling;
+                csum = cumsum(vals(R-centering:-1:1));
+                % For 13-volume test, this creates 13x13 array
+                cmean = csum(R-centering:-1:1)./(R-centering:-1:1)';
+                % Still 13x13 array
+                sigmasq_1 = cmean./scaling;
                 % Second estimation of Sigma^2; Eq 2 from ISMRM presentation
                 gamma = (MM - (0:R-centering-1)) / NNN;
                 rangeMP = 4*sqrt(gamma(:));
                 rangeData = vals(1:R-centering) - vals(R-centering);
+                % sigmasq_2 is 13x13
                 sigmasq_2 = rangeData./rangeMP;
+                % 1D-style index of 13x13 array, selecting first element
                 t = find(sigmasq_2 < sigmasq_1, 1);
+                % Zero out... non-significant(?) singular values?
+                % BUG: Indexing 13x1 array based on index of 13x13 array?? WTF?
                 S(t:end)=0;
 
 
@@ -996,6 +1006,7 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
                 S(max(1,end-floor(idx*soft_thrs)):end)=0;
             end
 
+            % Reconstruct the patch data without the excluded singular values
             tmp1=U*diag(S)*V';
 
             tmp1=reshape(tmp1,size(KSP2_tmp));
@@ -1082,7 +1093,8 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
             if isempty(soft_thrs)
                 energy_scrub=sqrt(sum(S.^1)).\sqrt(sum(S(S<lambda2).^1));
                 S(S<lambda2)=0;
-                t=idx;
+                % BUG???
+                t=idx;  % This is number of zero elements in array, not index of last non-zero element
             elseif soft_thrs~=10;
 
                 S=S-lambda2*soft_thrs;
@@ -1113,13 +1125,18 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
                     vals=S;
                     vals = (vals).^2 / NNN;
                     % First estimation of Sigma^2;  Eq 1 from ISMRM presentation
-                    csum = cumsum(vals(R-centering:-1:1)); cmean = csum(R-centering:-1:1)./(R-centering:-1:1)'; sigmasq_1 = cmean./scaling;
+                    csum = cumsum(vals(R-centering:-1:1));
+                    cmean = csum(R-centering:-1:1)./(R-centering:-1:1)';
+                    sigmasq_1 = cmean./scaling;
                     % Second estimation of Sigma^2; Eq 2 from ISMRM presentation
                     gamma = (MM - (0:R-centering-1)) / NNN;
                     rangeMP = 4*sqrt(gamma(:));
                     rangeData = vals(1:R-centering) - vals(R-centering);
                     sigmasq_2 = rangeData./rangeMP;
+                    % 1D-style index of 13x13 array, selecting first element
                     t = find(sigmasq_2 < sigmasq_1, 1);
+                    % Zero out... non-significant(?) singular values?
+                    % BUG: Indexing 13x1 array based on index of 13x13 array?? WTF?
                     % NOISE(1:size(KSP2a,1),[1:w2]+(n2-1),[1:w3]+(n3-1),1) = sigmasq_2(t);
                     idx=size(S(t:end),1)  ;
                     energy_scrub=sqrt(sum(S.^1)).\sqrt(sum(S(t:end).^1));
@@ -1153,6 +1170,7 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
                 energy_removed(:,[1:w2]+(n2-1),[1:w3]+(n3-1),:) =...
                     energy_removed(:,[1:w2]+(n2-1),[1:w3]+(n3-1),:) +energy_scrub;
 
+                % In NORDIC mode, S(1)./S(max(1,t-1)) will be Inf
                 SNR_weight(:,[1:w2]+(n2-1),[1:w3]+(n3-1),1) =...
                     SNR_weight(:,[1:w2]+(n2-1),[1:w3]+(n3-1),1) + S(1)./S(max(1,t-1));
 
