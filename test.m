@@ -1094,7 +1094,7 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
                 energy_scrub=sqrt(sum(S.^1)).\sqrt(sum(S(S<lambda2).^1));
                 S(S<lambda2)=0;
                 % BUG???
-                t=idx;  % This is number of zero elements in array, not index of last non-zero element
+                t=idx;  % TS: This is number of zero elements in array, not index of last non-zero element
             elseif soft_thrs~=10;
 
                 S=S-lambda2*soft_thrs;
@@ -1157,6 +1157,7 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
 
             if patch_scale==1; else; patch_scale=size(S,1)-idx; end
 
+            % TS: It's never empty, even if the threshold removed all.
             if isempty(t);  t=1; end  % threshold removed all.
 
             if patch_avg==1
@@ -1170,7 +1171,7 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
                 energy_removed(:,[1:w2]+(n2-1),[1:w3]+(n3-1),:) =...
                     energy_removed(:,[1:w2]+(n2-1),[1:w3]+(n3-1),:) +energy_scrub;
 
-                % In NORDIC mode, S(1)./S(max(1,t-1)) will be Inf
+                % In NORDIC mode, S(1)./S(max(1,t-1)) will be NaN
                 SNR_weight(:,[1:w2]+(n2-1),[1:w3]+(n3-1),1) =...
                     SNR_weight(:,[1:w2]+(n2-1),[1:w3]+(n3-1),1) + S(1)./S(max(1,t-1));
 
