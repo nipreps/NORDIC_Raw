@@ -1,16 +1,4 @@
-function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
-
-    % Additional code for integration with the Nipype interface for NIFTI_NORDIC
-    % This customization is tailored to the specific requirements of it and may
-    % need adaptations when the Nipype interface is modified
-
-    if exist('ARG_path')
-        arg_struct = load(ARG_path);
-        ARG = arg_struct.ARG;
-        ARG = structfun(@double, ARG, 'uniformoutput', 0); %fields need to be casted to double (from python struct with datatype int64)
-        disp(ARG)
-    end
-
+function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG)
     % fMRI
     %  fn_magn_in='name.nii.gz';
     %  fn_phase_in='name2.nii.gz';
@@ -716,6 +704,20 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG_path)
     IMG2=IMG2.*ARG.ABSOLUTE_SCALE;
 
     IMG2(isnan(IMG2))=0;
+
+    if ARG.use_generic_NII_read==0;
+        niftiwrite((KSP_weight), fullfile(ARG.DIROUT 'n_patch_runs.nii'), info)
+    else
+        nii=make_nii(KSP_weight);
+        save_nii(nii, fullfile(ARG.DIROUT, 'n_patch_runs.nii'))
+    end
+
+    if ARG.use_generic_NII_read==0;
+        niftiwrite((ARG.Component_threshold), fullfile(ARG.DIROUT 'n_components_removed.nii'), info)
+    else
+        nii=make_nii(ARG.Component_threshold);
+        save_nii(nii, fullfile(ARG.DIROUT, 'n_components_removed.nii'))
+    end
 
     if isfield(ARG,'make_complex_nii')
         IMG2_tmp=abs(IMG2(:,:,:,1:end)); % remove g-factor and noise for DUAL 1

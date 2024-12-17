@@ -1,6 +1,5 @@
 """Another Python attempt at NORDIC."""
 
-import warnings
 from copy import deepcopy
 from pathlib import Path
 
@@ -110,6 +109,8 @@ def run_nordic(
     - np.abs(complex) returns the magnitude.
     - np.exp(1j * phase) returns the complex number with the given phase.
     - mag * np.exp(1j * phase) returns the complex number.
+    - NVR = noise variance reduction
+    - LLR = locally low-rank
     """
     out_dir = Path(out_dir)
 
@@ -162,10 +163,10 @@ def run_nordic(
     n_x, n_y, n_slices, n_vols = complex_data.shape
 
     # Select the first volume of the complex data and take the absolute values
-    TEMPVOL = np.abs(complex_data[..., 0])
+    first_volume = np.abs(complex_data[..., 0])
 
     # Find the minimum non-zero value in the first volume and divide the complex data by it
-    ARG["ABSOLUTE_SCALE"] = np.min(TEMPVOL[TEMPVOL != 0])
+    ARG["ABSOLUTE_SCALE"] = np.min(first_volume[first_volume != 0])
     complex_data = complex_data / ARG["ABSOLUTE_SCALE"]
 
     if complex_data.shape[3] < 6:
@@ -282,11 +283,11 @@ def run_nordic(
     # ARG['soft_thrs'] = []  # NORDIC (When noise is flat)
 
     # Preallocate 3D arrays of zeros
-    KSP_weight = np.zeros_like(KSP2[..., 0])
-    NOISE = np.zeros_like(KSP_weight)
-    Component_threshold = np.zeros_like(KSP_weight)
-    energy_removed = np.zeros_like(KSP_weight)
-    SNR_weight = np.zeros_like(KSP_weight)
+    total_patch_weights = np.zeros(KSP2.shape[:3], dtype=int)
+    NOISE = np.zeros_like(KSP2[..., 0])
+    Component_threshold = np.zeros(KSP2.shape[:3], dtype=float)
+    energy_removed = np.zeros(KSP2.shape[:3], dtype=float)
+    SNR_weight = np.zeros(KSP2.shape[:3], dtype=float)
     # The original code re-creates KSP_processed here for no reason
 
     # patch_average is hardcoded as False so this block is always executed.
@@ -309,7 +310,7 @@ def run_nordic(
         (
             KSP_recon,
             _,
-            KSP_weight,
+            total_patch_weights,
             NOISE,
             Component_threshold,
             energy_removed,
@@ -321,18 +322,18 @@ def run_nordic(
             patch_num=i_x_patch,
             QQ=QQ,
             master=master_fast,
-            KSP2_weight=KSP_weight,
+            total_patch_weights=total_patch_weights,
             NOISE=NOISE,
             Component_threshold=Component_threshold,
             energy_removed=energy_removed,
             SNR_weight=SNR_weight,
         )
 
-    KSP_recon = KSP_recon / KSP_weight[..., None]
-    ARG["NOISE"] = np.sqrt(NOISE / KSP_weight)
-    ARG["Component_threshold"] = Component_threshold / KSP_weight
-    ARG["energy_removed"] = energy_removed / KSP_weight
-    ARG["SNR_weight"] = SNR_weight / KSP_weight
+    KSP_recon = KSP_recon / total_patch_weights[..., None]
+    ARG["NOISE"] = np.sqrt(NOISE / total_patch_weights)
+    ARG["Component_threshold"] = Component_threshold / total_patch_weights
+    ARG["energy_removed"] = energy_removed / total_patch_weights
+    ARG["SNR_weight"] = SNR_weight / total_patch_weights
 
     # ARG2 = ARG
     print("Completed estimating g-factor")
@@ -470,11 +471,11 @@ def run_nordic(
     if algorithm in ["mppca", "mppca+nordic"]:
         ARG["soft_thrs"] = 10
 
-    KSP_weight = np.zeros_like(KSP2[..., 0])
-    NOISE = KSP_weight.copy()
-    Component_threshold = KSP_weight.copy()
-    energy_removed = KSP_weight.copy()
-    SNR_weight = KSP_weight.copy()
+    total_patch_weights = np.zeros(KSP2.shape[:3], dtype=int)
+    NOISE = np.zeros_like(KSP2[..., 0])  # complex
+    Component_threshold = np.zeros(KSP2.shape[:3], dtype=float)
+    energy_removed = np.zeros(KSP2.shape[:3], dtype=float)
+    SNR_weight = np.zeros(KSP2.shape[:3], dtype=float)
 
     n_x_patches = n_x - ARG["kernel_size"][0]
     # Reset KSP_processed to zeros for next stage
@@ -495,7 +496,7 @@ def run_nordic(
         (
             KSP_recon,
             _,
-            KSP_weight,
+            total_patch_weights,
             NOISE,
             Component_threshold,
             energy_removed,
@@ -507,19 +508,21 @@ def run_nordic(
             patch_num=i_x_patch,
             QQ=QQ,
             master=master_fast,
-            KSP2_weight=KSP_weight,
+            total_patch_weights=total_patch_weights,
             NOISE=NOISE,
             Component_threshold=Component_threshold,
             energy_removed=energy_removed,
             SNR_weight=SNR_weight,
         )
 
-    # Assumes that the combination is with N instead of sqrt(N). Works for NVR not MPPCA
-    KSP_recon = KSP_recon / KSP_weight[..., None]
-    ARG["NOISE"] = np.sqrt(NOISE / KSP_weight)
-    ARG["Component_threshold"] = Component_threshold / KSP_weight
-    ARG["energy_removed"] = energy_removed / KSP_weight
-    ARG["SNR_weight"] = SNR_weight / KSP_weight
+    # Assumes that the combination is with N instead of sqrt(N). Works for NVR not MPPCA.
+    # These arrays are summed over patches and need to be scaled by the patch scaling factor,
+    # which is typically just the number of patches that contribute to each voxel.
+    KSP_recon = KSP_recon / total_patch_weights[..., None]
+    ARG["NOISE"] = np.sqrt(NOISE / total_patch_weights)
+    ARG["Component_threshold"] = Component_threshold / total_patch_weights
+    ARG["energy_removed"] = energy_removed / total_patch_weights
+    ARG["SNR_weight"] = SNR_weight / total_patch_weights
     print("Completed NORDIC")
 
     if has_complex:
@@ -554,6 +557,17 @@ def run_nordic(
     denoised_complex *= np.exp(1j * np.angle(DD_phase))
     denoised_complex = denoised_complex * ARG["ABSOLUTE_SCALE"]  # rescale the data
     denoised_complex[np.isnan(denoised_complex)] = 0
+
+    # Write out number of components removed
+    n_components_removed = ARG["Component_threshold"].copy()
+    n_components_removed_img = nb.Nifti1Image(n_components_removed, mag_img.affine, mag_img.header)
+    n_components_removed_img.to_filename(out_dir / "n_components_removed.nii.gz")
+    del n_components_removed, n_components_removed_img
+
+    n_patch_runs = total_patch_weights.copy()
+    n_patch_runs_img = nb.Nifti1Image(n_patch_runs, mag_img.affine, mag_img.header)
+    n_patch_runs_img.to_filename(out_dir / "n_patch_runs.nii.gz")
+    del n_patch_runs, n_patch_runs_img
 
     if has_complex:
         denoised_magn = np.abs(denoised_complex)  # remove g-factor and noise for DUAL 1
@@ -596,7 +610,7 @@ def sub_LLR_Processing(
     patch_num,
     QQ,
     master,
-    KSP2_weight,
+    total_patch_weights,
     NOISE=None,
     Component_threshold=None,
     energy_removed=None,
@@ -622,9 +636,12 @@ def sub_LLR_Processing(
         I don't know what the different values mean though.
         KSP2, ARG['LLR_scale']
     master : int
-    KSP2_weight : np.ndarray of shape (n_x, n_y, n_slices)
+    total_patch_weights : np.ndarray of shape (n_x, n_y, n_slices)
+        Used to scale the outputs, including KSP_recon, NOISE, Component_threshold,
+        and energy_removed.
     NOISE : np.ndarray of shape (n_x, n_y, n_slices)
     Component_threshold : np.ndarray of shape (n_x, n_y, n_slices)
+        The mean number of singular values removed by the denoising step.
     energy_removed : np.ndarray of shape (n_x, n_y, n_slices)
     SNR_weight : np.ndarray of shape (n_x, n_y, n_slices)
 
@@ -632,7 +649,7 @@ def sub_LLR_Processing(
     -------
     KSP_recon : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
     KSP2 : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
-    KSP2_weight : np.ndarray of shape (n_x, n_y, n_slices)
+    total_patch_weights : np.ndarray of shape (n_x, n_y, n_slices)
     NOISE : np.ndarray of shape (n_x, n_y, n_slices)
     Component_threshold : np.ndarray of shape (n_x, n_y, n_slices)
     energy_removed : np.ndarray of shape (n_x, n_y, n_slices)
@@ -676,17 +693,17 @@ def sub_LLR_Processing(
                     lambda_ = QQ["ARG"]["LLR_scale"] * ARG["NVR_threshold"]
 
                 if ARG["patch_average"]:  # patch_average is always False
-                    DATA_full2, KSP2_weight = subfunction_loop_for_NVR_avg(
+                    DATA_full2, total_patch_weights = subfunction_loop_for_NVR_avg(
                         KSP2_x_patch=KSP2_x_patch,
                         kernel_size_z=ARG["kernel_size"][2],
                         kernel_size_y=ARG["kernel_size"][1],
                         lambda2=lambda_,
                         soft_thrs=ARG["soft_thrs"],
-                        KSP2_weight=KSP2_weight,
+                        total_patch_weights=total_patch_weights,
                         patch_average_sub=ARG["patch_average_sub"],
                     )
                 else:
-                    KSP2_weight_x_patch = KSP2_weight[x_patch_idx, :, :]
+                    x_patch_weights = total_patch_weights[x_patch_idx, :, :]
                     NOISE_x_patch = NOISE[x_patch_idx, :, :]
                     Component_threshold_x_patch = Component_threshold[x_patch_idx, :, :]
                     energy_removed_x_patch = energy_removed[x_patch_idx, :, :]
@@ -694,7 +711,7 @@ def sub_LLR_Processing(
 
                     (
                         DATA_full2,
-                        KSP2_weight_x_patch,
+                        x_patch_weights,
                         NOISE_x_patch,
                         Component_threshold_x_patch,
                         energy_removed_x_patch,
@@ -706,7 +723,7 @@ def sub_LLR_Processing(
                         lambda2=lambda_,
                         patch_avg=True,
                         soft_thrs=ARG["soft_thrs"],
-                        KSP2_weight=KSP2_weight_x_patch,
+                        total_patch_weights=x_patch_weights,
                         NOISE=NOISE_x_patch,
                         KSP2_tmp_update_threshold=Component_threshold_x_patch,
                         energy_removed=energy_removed_x_patch,
@@ -715,7 +732,7 @@ def sub_LLR_Processing(
                         patch_average_sub=ARG["patch_average_sub"],
                     )
 
-                    KSP2_weight[x_patch_idx, :, :] = KSP2_weight_x_patch
+                    total_patch_weights[x_patch_idx, :, :] = x_patch_weights
                     NOISE[x_patch_idx, :, :] = NOISE_x_patch
                     Component_threshold[x_patch_idx, :, :] = Component_threshold_x_patch
                     energy_removed[x_patch_idx, :, :] = energy_removed_x_patch
@@ -738,7 +755,7 @@ def sub_LLR_Processing(
     return (
         KSP_recon,
         KSP2,
-        KSP2_weight,
+        total_patch_weights,
         NOISE,
         Component_threshold,
         energy_removed,
@@ -753,7 +770,7 @@ def subfunction_loop_for_NVR_avg(
     lambda2,
     patch_avg=True,
     soft_thrs=None,
-    KSP2_weight=None,
+    total_patch_weights=None,
     patch_average_sub=None,
 ):
     """Do something.
@@ -765,9 +782,6 @@ def subfunction_loop_for_NVR_avg(
     KSP2_x_patch : np.ndarray of shape (kernel_size_x, n_y, n_z, n_vols)
         An x patch of KSP2 data. Y, Z, and T are full length.
     """
-    if KSP2_weight is None:
-        KSP2_weight = np.zeros(KSP2_x_patch.shape[:3])
-
     KSP2_tmp_update = np.zeros(KSP2_x_patch.shape)
     sigmasq_2 = None
 
@@ -783,19 +797,19 @@ def subfunction_loop_for_NVR_avg(
             z_patch_idx = np.arange(kernel_size_z, dtype=int) + z_patch
             KSP2_patch = KSP2_x_patch[:, y_patch_idx, :, :]
             KSP2_patch = KSP2_patch[:, :, z_patch_idx, :]
-            tmp1 = np.reshape(KSP2_patch, (np.prod(KSP2_patch.shape[:3]), KSP2_patch.shape[3]))
+            KSP2_patch_2d = np.reshape(KSP2_patch, (np.prod(KSP2_patch.shape[:3]), KSP2_patch.shape[3]))
 
-            # svd(tmp1, 'econ') in MATLAB
+            # svd(KSP2_patch_2d, 'econ') in MATLAB
             # S is 1D in Python, 2D diagonal matrix in MATLAB
-            U, S, V = np.linalg.svd(tmp1, full_matrices=False)
+            U, S, V = np.linalg.svd(KSP2_patch_2d, full_matrices=False)
 
             idx = np.sum(S < lambda2)
             if soft_thrs is None:
                 S[S < lambda2] = 0
             elif soft_thrs == 10:  # Using MPPCA
                 centering = 0
-                n_voxels_in_patch = tmp1.shape[0]
-                n_volumes = tmp1.shape[1]
+                n_voxels_in_patch = KSP2_patch_2d.shape[0]
+                n_volumes = KSP2_patch_2d.shape[1]
                 R = np.min((n_voxels_in_patch, n_volumes))
                 scaling = (np.max((n_voxels_in_patch, n_volumes)) - np.arange(R - centering, dtype=int)) / n_volumes
                 vals = S
@@ -825,7 +839,7 @@ def subfunction_loop_for_NVR_avg(
                 w2_slicex, w3_slicex = np.ix_(y_patch_idx, z_patch_idx)
 
                 KSP2_tmp_update[:, w2_slicex, w3_slicex, :] += denoised_patch
-                KSP2_weight[:, w2_slicex, w3_slicex] += 1
+                total_patch_weights[:, w2_slicex, w3_slicex] += 1
             else:
                 w2_tmp = int(np.round(kernel_size_y / 2)) + (y_patch - 1)
                 w3_tmp = int(np.round(kernel_size_z / 2)) + (z_patch - 1)
@@ -835,9 +849,9 @@ def subfunction_loop_for_NVR_avg(
                     int(np.round(denoised_patch.shape[2] / 2)),
                     :,
                 ]
-                KSP2_weight[:, w2_tmp, w3_tmp] += 1
+                total_patch_weights[:, w2_tmp, w3_tmp] += 1
 
-    return KSP2_tmp_update, KSP2_weight
+    return KSP2_tmp_update, total_patch_weights
 
 
 def subfunction_loop_for_NVR_avg_update(
@@ -845,13 +859,13 @@ def subfunction_loop_for_NVR_avg_update(
     kernel_size_z,
     kernel_size_y,
     lambda2,
+    total_patch_weights,
+    NOISE,
+    KSP2_tmp_update_threshold,
+    energy_removed,
+    SNR_weight,
     patch_avg=True,
     soft_thrs=1,
-    KSP2_weight=None,
-    NOISE=None,
-    KSP2_tmp_update_threshold=None,
-    energy_removed=None,
-    SNR_weight=None,
     patch_scale=1,
     patch_average_sub=None,
 ):
@@ -861,26 +875,57 @@ def subfunction_loop_for_NVR_avg_update(
     ----------
     KSP2_x_patch : np.ndarray of shape (kernel_size_x, n_y, n_z, n_vols)
         An x patch of KSP2 data. Y, Z, and T are full length.
+    kernel_size_z : int
+        Size of the kernel in the z-direction.
+    kernel_size_y : int
+        Size of the kernel in the y-direction.
+    lambda2 : float
+        Threshold for singular values.
     patch_avg : bool
         Hardcoded as True. Seems unrelated to ARG['patch_average'].
+    soft_thrs : float
+        Threshold for soft thresholding.
+        None for NORDIC, 10 for g-factor estimation. Other values are supported, but unused.
+    total_patch_weights : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        Weighting array for KSP2_x_patch(?).
+    NOISE : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        Noise array for KSP2_x_patch(?).
+    KSP2_tmp_update_threshold : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        Thresholded update array for KSP2_x_patch(?).
+    energy_removed : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        Energy removed array for KSP2_x_patch(?).
+    SNR_weight : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        SNR weighting array for KSP2_x_patch(?).
+    patch_scale : float
+        Scaling factor for the patch. Always set to 1.
+    patch_average_sub : int
+        Subsampling factor for patch averaging.
+        Typically 2 for both NORDIC and g-factor estimation.
+
+    Returns
+    -------
+    KSP2_tmp_update : np.ndarray of shape (kernel_size_x, n_y, n_z, n_vols)
+        Updated KSP2 data.
+    total_patch_weights : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        Updated weighting array.
+    NOISE : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        Updated noise array.
+    KSP2_tmp_update_threshold : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        Updated thresholded update array.
+    energy_removed : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        Updated energy removed array.
+    SNR_weight : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        Updated SNR weighting array.
     """
-    if KSP2_weight is None:
-        KSP2_weight = np.zeros(KSP2_x_patch.shape[:3])
+    total_patch_weights = total_patch_weights.copy()
+    KSP2_tmp_update_threshold = KSP2_tmp_update_threshold.copy()
+    energy_removed = energy_removed.copy()
+    SNR_weight = SNR_weight.copy()
+    KSP2_tmp_update = np.zeros_like(KSP2_x_patch)
 
     # Created in MATLAB version but not used
     # NOISE_x_patch = np.zeros(KSP2_x_patch.shape[:3])
     sigmasq_2 = None
-
-    if KSP2_tmp_update_threshold is None:
-        KSP2_tmp_update_threshold = np.zeros(KSP2_x_patch.shape[:3], dtype=KSP2_x_patch.dtype)
-
-    if energy_removed is None:
-        energy_removed = np.zeros(KSP2_x_patch.shape[:3])
-
-    if SNR_weight is None:
-        SNR_weight = np.zeros(KSP2_x_patch.shape[:3])
-
-    KSP2_tmp_update = np.zeros_like(KSP2_x_patch)
 
     spacing = max(1, int(np.floor(kernel_size_y / patch_average_sub)))
     last = KSP2_x_patch.shape[1] - kernel_size_y + 1
@@ -901,10 +946,9 @@ def subfunction_loop_for_NVR_avg_update(
             KSP2_patch = KSP2_x_patch[:, y_patch_idx, :, :]
             KSP2_patch = KSP2_patch[:, :, z_patch_idx, :]
             # Reshape into Casorati matrix (X*Y*Z, T)
-            tmp1 = np.reshape(KSP2_patch, (np.prod(KSP2_patch.shape[:3]), KSP2_patch.shape[3]))
+            KSP2_patch_2d = np.reshape(KSP2_patch, (np.prod(KSP2_patch.shape[:3]), KSP2_patch.shape[3]))
 
-            U, S, V = np.linalg.svd(tmp1, full_matrices=False)
-            # S_orig = S.copy()
+            U, S, V = np.linalg.svd(KSP2_patch_2d, full_matrices=False)
 
             idx = np.sum(S < lambda2)
             if soft_thrs is None:  # NORDIC
@@ -922,13 +966,13 @@ def subfunction_loop_for_NVR_avg_update(
                 energy_scrub = 0
                 t = 1
             elif soft_thrs == 10:  # USING MPPCA
-                voxelwise_sums = np.sum(tmp1, axis=1)
+                voxelwise_sums = np.sum(KSP2_patch_2d, axis=1)
                 n_zero_voxels_in_patch = np.sum(voxelwise_sums == 0)
                 centering = 0
                 # Correction for some zero entries
-                n_nonzero_voxels_in_patch = tmp1.shape[0] - n_zero_voxels_in_patch
+                n_nonzero_voxels_in_patch = KSP2_patch_2d.shape[0] - n_zero_voxels_in_patch
                 if n_nonzero_voxels_in_patch > 0:
-                    n_volumes = tmp1.shape[1]
+                    n_volumes = KSP2_patch_2d.shape[1]
                     R = np.min((n_nonzero_voxels_in_patch, n_volumes))
                     scaling = (max(n_nonzero_voxels_in_patch, n_volumes) - np.arange(R - centering, dtype=int)) / n_volumes
                     scaling = scaling.flatten()
@@ -958,7 +1002,7 @@ def subfunction_loop_for_NVR_avg_update(
                 else:  # all zero entries
                     t = 1
                     energy_scrub = 0
-                    sigmasq_2 = 0
+                    sigmasq_2 = None
 
             else:  # SHOULD BE UNREACHABLE
                 S[np.max((1, S.shape[0] - int(np.floor(idx * soft_thrs)))) :] = 0
@@ -975,12 +1019,15 @@ def subfunction_loop_for_NVR_avg_update(
                 t = 0
 
             if patch_avg:
+                # Update the entire patch
                 # Use np.ix_ to create a broadcastable indexing array
                 w2_slicex, w3_slicex = np.ix_(y_patch_idx, z_patch_idx)
                 KSP2_tmp_update[:, w2_slicex, w3_slicex, :] = (
                     KSP2_tmp_update[:, w2_slicex, w3_slicex, :] + (patch_scale * denoised_patch)
                 )
-                KSP2_weight[:, w2_slicex, w3_slicex] += patch_scale
+                # total scaling factor across patches affecting a given voxel
+                total_patch_weights[:, w2_slicex, w3_slicex] += patch_scale
+                # number of singular values *removed*
                 KSP2_tmp_update_threshold[:, w2_slicex, w3_slicex] += idx
                 energy_removed[:, w2_slicex, w3_slicex] += energy_scrub
 
@@ -1008,6 +1055,7 @@ def subfunction_loop_for_NVR_avg_update(
                     NOISE[w1_slicex, w2_slicex, w3_slicex] += sigmasq_2[t, t]
 
             else:
+                # Only update a single voxel in the middle of the patch
                 w2_tmp = int(np.round(kernel_size_y / 2)) + y_patch
                 w3_tmp = int(np.round(kernel_size_z / 2)) + z_patch
 
@@ -1020,16 +1068,16 @@ def subfunction_loop_for_NVR_avg_update(
                         :,
                     ]
                 )
-                KSP2_weight[:, w2_tmp, w3_tmp] += patch_scale
+                total_patch_weights[:, w2_tmp, w3_tmp] += patch_scale
                 KSP2_tmp_update_threshold[:, w2_tmp, w3_tmp, :] += idx
                 energy_removed[:, w2_tmp, w3_tmp] += energy_scrub
                 SNR_weight[:, w2_tmp, w3_tmp] += S[0] / S[max(0, t - 2)]
-                if sigmasq_2 is not None:
+                if sigmasq_2 is not None:  # sigmasq_2 is only defined when soft_thrs == 10
                     NOISE[:, w2_tmp, w3_tmp] += sigmasq_2[t, t]
 
     return (
         KSP2_tmp_update,
-        KSP2_weight,
+        total_patch_weights,
         NOISE,
         KSP2_tmp_update_threshold,
         energy_removed,
