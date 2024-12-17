@@ -1,4 +1,4 @@
-function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG)
+function NIFTI_NORDIC(fn_magn_in,fn_phase_in,fn_out,ARG)
     % fMRI
     %  fn_magn_in='name.nii.gz';
     %  fn_phase_in='name2.nii.gz';
@@ -808,7 +808,7 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG)
     return
 
 
-    function  [KSP_recon,KSP2,KSP2_weight,NOISE, Component_threshold,energy_removed,SNR_weight]=sub_LLR_Processing(KSP_recon,KSP2,ARG,n1,QQ,master,KSP2_weight,NOISE,Component_threshold,energy_removed,SNR_weight)
+function  [KSP_recon,KSP2,KSP2_weight,NOISE, Component_threshold,energy_removed,SNR_weight]=sub_LLR_Processing(KSP_recon,KSP2,ARG,n1,QQ,master,KSP2_weight,NOISE,Component_threshold,energy_removed,SNR_weight)
 
     if ~exist('NOISE'); NOISE=[];  end
     if ~exist('Component_threshold');Component_threshold=[];  end
@@ -927,7 +927,7 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG)
 
 
 
-    function [KSP2_tmp_update, KSP2_weight]=subfunction_loop_for_NVR_avg(KSP2a,w3,w2,w1,lambda2,patch_avg, soft_thrs,KSP2_weight,ARG)
+function [KSP2_tmp_update, KSP2_weight]=subfunction_loop_for_NVR_avg(KSP2a,w3,w2,w1,lambda2,patch_avg, soft_thrs,KSP2_weight,ARG)
     if ~exist('patch_avg'); patch_avg=1;end
     if ~exist('soft_thrs'); soft_thrs=[]; end
 
@@ -1037,7 +1037,7 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG)
 
 
 
-    function [KSP2_tmp_update, KSP2_weight,NOISE,KSP2_tmp_update_threshold,energy_removed,SNR_weight]=subfunction_loop_for_NVR_avg_update(KSP2a,w3,w2,w1,lambda2,patch_avg, soft_thrs,KSP2_weight,ARG,NOISE,KSP2_tmp_update_threshold,energy_removed,SNR_weight)
+function [KSP2_tmp_update, KSP2_weight,NOISE,KSP2_tmp_update_threshold,energy_removed,SNR_weight]=subfunction_loop_for_NVR_avg_update(KSP2a,w3,w2,w1,lambda2,patch_avg, soft_thrs,KSP2_weight,ARG,NOISE,KSP2_tmp_update_threshold,energy_removed,SNR_weight)
 
     if ~isfield(ARG,'patch_scale'); patch_scale=1; else; patch_scale=ARG.patch_scale;end
     if ~exist('patch_avg'); patch_avg=1;end    %   patch_avg=0; means zero only
@@ -1206,7 +1206,4 @@ function NIFTI_NORDIC_nipype(fn_magn_in,fn_phase_in,fn_out,ARG)
 
         end
     end
-
-
     return
-

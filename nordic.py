@@ -933,6 +933,8 @@ def subfunction_loop_for_NVR_avg_update(
     # Can introduce duplicate, but that a bug in MATLAB
     y_patches.append(KSP2_x_patch.shape[1] - kernel_size_y)
     # y_patches = sorted(set(y_patches))
+    print("n2")
+    print(y_patches)
     for y_patch in y_patches:
         y_patch_idx = np.arange(kernel_size_y, dtype=int) + y_patch
         spacing = max(1, int(np.floor(kernel_size_z / patch_average_sub)))
@@ -941,6 +943,8 @@ def subfunction_loop_for_NVR_avg_update(
         # Can introduce duplicate, but that a bug in MATLAB
         z_patches.append(KSP2_x_patch.shape[2] - kernel_size_z)
         # z_patches = sorted(set(z_patches))
+        print("n3")
+        print(z_patches)
         for z_patch in z_patches:
             z_patch_idx = np.arange(kernel_size_z, dtype=int) + z_patch
             KSP2_patch = KSP2_x_patch[:, y_patch_idx, :, :]
