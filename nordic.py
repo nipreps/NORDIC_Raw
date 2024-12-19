@@ -1,5 +1,6 @@
 """Another Python attempt at NORDIC."""
 
+import os
 from copy import deepcopy
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def run_nordic(
     full_dynamic_range=False,
     temporal_phase=1,
     algorithm="nordic",
-    kernel_size_gfactor=[],
+    kernel_size_gfactor=None,
     kernel_size_PCA=None,
     phase_slice_average_for_kspace_centering=False,
     phase_filter_width=3,
@@ -296,7 +297,7 @@ def run_nordic(
         val = int(max(1, int(np.floor(ARG["kernel_size"][0] / ARG["patch_average_sub"]))))
         for nw1 in range(1, val):
             # KSP_processed(1,nw1 : max(1,floor(ARG.ARG['kernel_size'](1)/ARG.patch_average_sub)):end)=2;
-            QQ["KSP_processed"][nw1:val:] = 2
+            QQ["KSP_processed"][nw1::val] = 2
         QQ["KSP_processed"][-1] = 0
 
     print("Estimating g-factor ...")
@@ -484,7 +485,7 @@ def run_nordic(
     if not ARG["patch_average"]:
         val = max(1, int(np.floor(ARG["kernel_size"][0] / ARG["patch_average_sub"])))
         for nw1 in range(1, val):
-            QQ["KSP_processed"][nw1:val:] = 2
+            QQ["KSP_processed"][nw1::val] = 2
         QQ["KSP_processed"][-1] = 0
 
     print("Starting NORDIC ...")
@@ -656,7 +657,6 @@ def sub_LLR_Processing(
     SNR_weight : np.ndarray of shape (n_x, n_y, n_slices)
     """
     import pickle
-    import os
 
     _, n_y, _, _ = KSP2.shape
     x_patch_idx = np.arange(0, ARG["kernel_size"][0], dtype=int) + patch_num
@@ -674,6 +674,16 @@ def sub_LLR_Processing(
             if not os.path.isfile(data_file):
                 # identified as bad file and being identified for reprocessing
                 QQ["KSP_processed"][patch_num] = 0
+                print(f"{patch_num + 1}: Skipping")
+                return (
+                    KSP_recon,
+                    KSP2,
+                    total_patch_weights,
+                    NOISE,
+                    Component_threshold,
+                    energy_removed,
+                    SNR_weight,
+                )
             else:
                 with open(data_file, "rb") as f:
                     DATA_full2 = pickle.load(f)
@@ -703,6 +713,7 @@ def sub_LLR_Processing(
                         patch_average_sub=ARG["patch_average_sub"],
                     )
                 else:
+                    print(f"{patch_num + 1}: Processing")
                     x_patch_weights = total_patch_weights[x_patch_idx, :, :]
                     NOISE_x_patch = NOISE[x_patch_idx, :, :]
                     Component_threshold_x_patch = Component_threshold[x_patch_idx, :, :]
@@ -720,6 +731,7 @@ def sub_LLR_Processing(
                         KSP2_x_patch=KSP2_x_patch,
                         kernel_size_z=ARG["kernel_size"][2],
                         kernel_size_y=ARG["kernel_size"][1],
+                        x_patch=patch_num,
                         lambda2=lambda_,
                         patch_avg=True,
                         soft_thrs=ARG["soft_thrs"],
@@ -856,6 +868,7 @@ def subfunction_loop_for_NVR_avg(
 
 def subfunction_loop_for_NVR_avg_update(
     KSP2_x_patch,
+    x_patch,
     kernel_size_z,
     kernel_size_y,
     lambda2,
@@ -927,28 +940,30 @@ def subfunction_loop_for_NVR_avg_update(
     # NOISE_x_patch = np.zeros(KSP2_x_patch.shape[:3])
     sigmasq_2 = None
 
-    spacing = max(1, int(np.floor(kernel_size_y / patch_average_sub)))
-    last = KSP2_x_patch.shape[1] - kernel_size_y + 1
-    y_patches = list(np.arange(0, last, spacing, dtype=int))
-    # Can introduce duplicate, but that a bug in MATLAB
+    y_spacing = max(1, int(np.floor(kernel_size_y / patch_average_sub)))
+    last_y = KSP2_x_patch.shape[1] - kernel_size_y + 1
+    y_patches = list(np.arange(0, last_y, y_spacing, dtype=int))
+    # Can introduce duplicate, but that's a bug in MATLAB
     y_patches.append(KSP2_x_patch.shape[1] - kernel_size_y)
     # y_patches = sorted(set(y_patches))
-    print("n2")
-    print(y_patches)
+
+    z_spacing = max(1, int(np.floor(kernel_size_z / patch_average_sub)))
+    last_z = KSP2_x_patch.shape[2] - kernel_size_z + 1
+    z_patches = list(np.arange(0, last_z, z_spacing, dtype=int))
+    # Can introduce duplicate, but that's a bug in MATLAB
+    z_patches.append(KSP2_x_patch.shape[2] - kernel_size_z)
+    # z_patches = sorted(set(z_patches))
+
     for y_patch in y_patches:
         y_patch_idx = np.arange(kernel_size_y, dtype=int) + y_patch
-        spacing = max(1, int(np.floor(kernel_size_z / patch_average_sub)))
-        last = KSP2_x_patch.shape[2] - kernel_size_z + 1
-        z_patches = list(np.arange(0, last, spacing, dtype=int))
-        # Can introduce duplicate, but that a bug in MATLAB
-        z_patches.append(KSP2_x_patch.shape[2] - kernel_size_z)
-        # z_patches = sorted(set(z_patches))
-        print("n3")
-        print(z_patches)
+
         for z_patch in z_patches:
             z_patch_idx = np.arange(kernel_size_z, dtype=int) + z_patch
-            KSP2_patch = KSP2_x_patch[:, y_patch_idx, :, :]
-            KSP2_patch = KSP2_patch[:, :, z_patch_idx, :]
+
+            # Use np.ix_ to create a broadcastable indexing array
+            w2_slicex, w3_slicex = np.ix_(y_patch_idx, z_patch_idx)
+
+            KSP2_patch = KSP2_x_patch[:, w2_slicex, w3_slicex, :]
             # Reshape into Casorati matrix (X*Y*Z, T)
             KSP2_patch_2d = np.reshape(KSP2_patch, (np.prod(KSP2_patch.shape[:3]), KSP2_patch.shape[3]))
 
@@ -1024,8 +1039,6 @@ def subfunction_loop_for_NVR_avg_update(
 
             if patch_avg:
                 # Update the entire patch
-                # Use np.ix_ to create a broadcastable indexing array
-                w2_slicex, w3_slicex = np.ix_(y_patch_idx, z_patch_idx)
                 KSP2_tmp_update[:, w2_slicex, w3_slicex, :] = (
                     KSP2_tmp_update[:, w2_slicex, w3_slicex, :] + (patch_scale * denoised_patch)
                 )
