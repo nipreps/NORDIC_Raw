@@ -390,9 +390,9 @@ def run_nordic(
         del n_patch_runs, n_patch_runs_img
 
     # Overwrite KSP2 with the original data
-    # meanphase isn't anything useful.
+    # meanphase isn't anything useful (just complex-valued zeros)
     KSP2 = complex_data.copy() * np.exp(-1j * np.angle(meanphase[..., None]))
-    KSP2 = KSP2 * gfactor[..., None]
+    KSP2 = KSP2 / gfactor[..., None]
 
     # Write out corrected magnitude and phase images
     if has_complex:
@@ -409,6 +409,7 @@ def run_nordic(
     # Calculate noise level from noise volumes
     ARG["measured_noise"] = 1
     if n_noise_vols > 0:
+        # BUG: MATLAB version only uses the first noise volume
         KSP2_NOISE = KSP2[..., -n_noise_vols:]
         KSP2_NOISE[np.isnan(KSP2_NOISE)] = 0
         KSP2_NOISE[np.isinf(KSP2_NOISE)] = 0
