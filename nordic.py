@@ -58,9 +58,20 @@ def run_nordic(
 
     Parameters
     ----------
+    mag_file : str
+        Path to the magnitude image file.
+    pha_file : str or None
+        Path to the phase image file. Default is None.
+    mag_norf_file : str or None
+        Path to the magnitude noRF image file. Default is None.
+    pha_norf_file : str or None
+        Path to the phase noRF image file. Default is None.
+    out_dir : str
+        Path to the output directory. Default is ".".
     factor_error : float
         error in gfactor estimation.
         >1 use higher noisefloor. <1 use lower noisefloor. Default is 1.
+        Rather than modifying the gfactor map, this changes NVR_threshold.
     full_dynamic_range : bool
         False keep the input scale, output maximizes range. Default is False.
     temporal_phase : {1, 2, 3}
@@ -97,6 +108,18 @@ def run_nordic(
     debug : bool
         If True, write out intermediate files for debugging.
         Default is False.
+    scale_patches : bool
+        Whether to scale the contributions of patches according to the variance removed by the
+        patch or not.
+        Default is False.
+        Undocumented parameter in the MATLAB implementation (ARG.patch_scale = 1) that
+        defaults to not scaling.
+    patch_average : bool
+        Hardcoded as False in the MATLAB code (ARG.patch_average = 0).
+    LLR_scale : float
+        Local low-rank scaling factor for the dneoising step. Default is 1.
+        Hardcoded as 0 for g-factor estimation and 1 for denoising in the MATLAB code
+        (ARG.LLR_scale).
 
     Notes
     -----
@@ -277,7 +300,6 @@ def run_nordic(
         pha_img.to_filename(out_dir / "phase_pregfactor_normalized.nii.gz")
         del mag_data, pha_data
 
-    # XXX: Start of function abstraction
     # Estimate the g-factor map
     if "nordic" in algorithm:
         # Reduce the number of volumes to 90 or fewer for g-factor estimation
@@ -310,8 +332,6 @@ def run_nordic(
         gfactor[np.isnan(gfactor)] = 0
         gfactor[gfactor < 1] = np.median(gfactor[gfactor != 0])
         data_has_zero_elements = 1
-
-    # XXX: End of function abstraction
 
     # Overwrite KSP2 with the original data
     # meanphase isn't anything useful (just complex-valued zeros)
@@ -558,6 +578,35 @@ def estimate_gfactor(
     debug=False,
     patch_average=False,
 ):
+    """Estimate the g-factor map.
+
+    Parameters
+    ----------
+    KSP2 : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+        The complex-valued k-space(?) data.
+    kernel_size : len-3 list or None
+        The size of the kernel to use for g-factor estimation.
+        Default is None.
+    patch_overlap : int
+        Default is 2.
+    out_dir : str
+        Path to the output directory.
+    full_dynamic_range : bool
+        Default is False.
+    img : nibabel.Nifti1Image
+        The NIfTI image object to use for the affine and header.
+    save_gfactor_map : bool
+        Default is True.
+    debug : bool
+        Default is False.
+    patch_average : bool
+        Default is False.
+
+    Returns
+    -------
+    gfactor : np.ndarray of shape (n_x, n_y, n_slices)
+        The estimated g-factor map.
+    """
     if kernel_size is None:
         kernel_size = [14, 14, 1]
     else:
@@ -727,6 +776,8 @@ def sub_LLR_Processing(
 
     # not being processed also not completed yet
     # DATA_full2 is (x_patch_size, n_y, n_z, n_vols)
+    # TODO: Drop all of this DATA_full2 stuff.
+    # AFAICT it's never used and there must be a cleaner way to skip certain patches.
     DATA_full2 = None
     if patch_statuses[patch_num] not in (1, 3):
         # processed but not added
