@@ -10,7 +10,20 @@ from scipy.signal.windows import tukey
 
 
 def estimate_noise_level(norf_data, is_complex=False):
-    """Estimate the noise level in a noise scan file."""
+    """Estimate the noise level in a noise scan file.
+
+    Parameters
+    ----------
+    norf_data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+        The no-excitation volumes from a noRF file.
+    is_complex : bool
+        If True, the data is complex-valued. Default is False.
+
+    Returns
+    -------
+    noise_level : float
+        The estimated noise level.
+    """
     norf_data[np.isnan(norf_data)] = 0
     norf_data[np.isinf(norf_data)] = 0
     noise_level = np.std(norf_data[norf_data != 0])
@@ -366,6 +379,7 @@ def run_nordic(
         ARG["data_has_zero_elements"] = 1
 
     if algorithm == "mppca":
+        # MPPCA mode doesn't use g-factor correction
         gfactor = np.ones(gfactor.shape)
 
     if save_gfactor_map:
@@ -411,13 +425,7 @@ def run_nordic(
     if n_noise_vols > 0:
         # BUG: MATLAB version only uses the first noise volume
         KSP2_NOISE = KSP2[..., -n_noise_vols:]
-        KSP2_NOISE[np.isnan(KSP2_NOISE)] = 0
-        KSP2_NOISE[np.isinf(KSP2_NOISE)] = 0
-        ARG["measured_noise"] = np.std(KSP2_NOISE[KSP2_NOISE != 0])
-
-    if has_complex:
-        # Rescale the noise level for complex data
-        ARG["measured_noise"] = ARG["measured_noise"] / np.sqrt(2)
+        ARG["measured_noise"] = estimate_noise_level(KSP2_NOISE, is_complex=has_complex)
 
     if ARG["temporal_phase"] == 3:
         # Secondary step for filtered phase with residual spikes
@@ -674,6 +682,7 @@ def sub_LLR_Processing(
     -------
     KSP_recon : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
     KSP2 : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+        Not modified in this function so could just be dropped as an output.
     total_patch_weights : np.ndarray of shape (n_x, n_y, n_slices)
     NOISE : np.ndarray of shape (n_x, n_y, n_slices)
     Component_threshold : np.ndarray of shape (n_x, n_y, n_slices)
@@ -756,7 +765,6 @@ def sub_LLR_Processing(
                         KSP2_x_patch=KSP2_x_patch,
                         kernel_size_z=ARG["kernel_size"][2],
                         kernel_size_y=ARG["kernel_size"][1],
-                        x_patch=patch_num,
                         lambda2=lambda_,
                         patch_avg=True,
                         soft_thrs=ARG["soft_thrs"],
@@ -896,7 +904,6 @@ def subfunction_loop_for_NVR_avg(
 
 def subfunction_loop_for_NVR_avg_update(
     KSP2_x_patch,
-    x_patch,
     kernel_size_z,
     kernel_size_y,
     lambda2,
@@ -1005,6 +1012,8 @@ def subfunction_loop_for_NVR_avg_update(
                 S[S < lambda2] = 0
                 # This is number of zero elements in array, not index of last non-zero element
                 # BUG???
+                # Should it be the following instead?
+                # first_removed_component = S.size - n_removed_components
                 first_removed_component = n_removed_components
                 # Lots of S arrays that are *just* zeros
             elif soft_thrs != 10:
@@ -1029,13 +1038,14 @@ def subfunction_loop_for_NVR_avg_update(
                     # First estimation of Sigma^2;  Eq 1 from ISMRM presentation
                     csum = np.cumsum(vals[::-1][:R - centering])
                     cmean = (csum[::-1][:R - centering] / np.arange(1, R + 1 - centering)[::-1])
-                    sigmasq_1 = cmean / scaling
+                    sigmasq_1 = cmean / scaling  # 1D array with length n_volumes
 
                     # Second estimation of Sigma^2; Eq 2 from ISMRM presentation
                     gamma = (n_nonzero_voxels_in_patch - np.arange(R - centering, dtype=int)) / n_volumes
                     rangeMP = 4 * np.sqrt(gamma)
                     rangeData = vals[: R - centering + 1] - vals[R - centering - 1]
-                    sigmasq_2 = rangeData / rangeMP
+                    sigmasq_2 = rangeData / rangeMP  # 1D array with length n_volumes
+
                     first_removed_component = np.where(sigmasq_2 < sigmasq_1)[0][0]
                     n_removed_components = S.size - first_removed_component
 
@@ -1043,9 +1053,6 @@ def subfunction_loop_for_NVR_avg_update(
                     # MATLAB: 5 .\ 2 = 2 ./ 5
                     energy_scrub = np.sqrt(np.sum(S[first_removed_component:])) / np.sqrt(np.sum(S))
 
-                    # first_removed_component is 2D index (a, b), but S is a 1D array! (13, 13) vs (13,)
-                    # And yet somehow the max idx seems to always be n_volumes,
-                    # so maybe it's okay.
                     S[first_removed_component:] = 0
                 else:  # all zero entries
                     first_removed_component = 0
