@@ -378,7 +378,9 @@ def run_nordic(
                 filtered_phase[:, :, i_slice, j_vol] = temp_filtered_phase_slice
 
     if debug:
-        filtered_phase_img = nb.Nifti1Image(filtered_phase.astype(float), img.affine, img.header)
+        filtered_phase_img = nb.Nifti1Image(
+            filtered_phase.astype(float), img.affine, img.header
+        )
         filtered_phase_img.to_filename(out_dir / "filtered_phase.nii.gz")
 
     k_space = k_space * np.exp(-1j * np.angle(filtered_phase))
@@ -409,7 +411,9 @@ def run_nordic(
 
     if n_slices <= kernel_size[2]:  # Number of slices is less than cubic kernel
         old_kernel_size = kernel_size[:]
-        kernel_size = np.ones(3, dtype=int) * int(np.round(np.sqrt(n_vols * 11 / n_slices)))
+        kernel_size = np.ones(3, dtype=int) * int(
+            np.round(np.sqrt(n_vols * 11 / n_slices))
+        )
         kernel_size[2] = n_slices
         print(
             f"Number of slices is less than cubic kernel. "
@@ -709,7 +713,7 @@ def estimate_gfactor(
         if full_dynamic_range:
             tmp = np.sort(gfactor_magnitude.flatten())
             # added -1 to match MATLAB indexing
-            sn_scale = (2 * tmp[int(np.round(0.99 * len(tmp))) - 1])
+            sn_scale = 2 * tmp[int(np.round(0.99 * len(tmp))) - 1]
             gain_level = np.floor(np.log2(32000 / sn_scale))
             gfactor_magnitude = gfactor_magnitude * (2**gain_level)
 
@@ -785,7 +789,7 @@ def sub_llr_processing(
         if patch_statuses[patch_num] == 2:
             # loading instead of processing
             # load file as soon as save, if more than 10 sec, just do the recon instead.
-            data_file = f'{filename}slice{patch_num}.pkl'
+            data_file = f"{filename}slice{patch_num}.pkl"
             # if file doesn't exist go to next slice
             if not os.path.isfile(data_file):
                 # identified as bad file and being identified for reprocessing
@@ -863,7 +867,7 @@ def sub_llr_processing(
             reconstructed_k_space[x_patch_idx, ...] += DATA_full2
             raise NotImplementedError("This block is never executed.")
         else:
-            reconstructed_k_space[x_patch_idx, : n_y, ...] += DATA_full2
+            reconstructed_k_space[x_patch_idx, :n_y, ...] += DATA_full2
 
         patch_statuses[patch_num] = 3
 
@@ -913,7 +917,10 @@ def subfunction_loop_for_nvr_avg(
             z_patch_idx = np.arange(kernel_size_z, dtype=int) + z_patch
             k_space_patch = k_space_x_patch[:, y_patch_idx, :, :]
             k_space_patch = k_space_patch[:, :, z_patch_idx, :]
-            k_space_patch_2d = np.reshape(k_space_patch, (np.prod(k_space_patch.shape[:3]), k_space_patch.shape[3]))
+            k_space_patch_2d = np.reshape(
+                k_space_patch,
+                (np.prod(k_space_patch.shape[:3]), k_space_patch.shape[3]),
+            )
 
             # svd(k_space_patch_2d, 'econ') in MATLAB
             # S is 1D in Python, 2D diagonal matrix in MATLAB
@@ -927,17 +934,25 @@ def subfunction_loop_for_nvr_avg(
                 n_voxels_in_patch = k_space_patch_2d.shape[0]
                 n_volumes = k_space_patch_2d.shape[1]
                 R = np.min((n_voxels_in_patch, n_volumes))
-                scaling = (np.max((n_voxels_in_patch, n_volumes)) - np.arange(R - centering, dtype=int)) / n_volumes
+                scaling = (
+                    np.max((n_voxels_in_patch, n_volumes))
+                    - np.arange(R - centering, dtype=int)
+                ) / n_volumes
                 vals = S
                 vals = (vals**2) / n_volumes
 
                 # First estimation of Sigma^2;  Eq 1 from ISMRM presentation
-                csum = np.cumsum(vals[::-1][:R - centering])
-                cmean = (csum[::-1][:R - centering][:, None] / np.arange(1, R + 1 - centering)[::-1][None, :]).T
+                csum = np.cumsum(vals[::-1][: R - centering])
+                cmean = (
+                    csum[::-1][: R - centering][:, None]
+                    / np.arange(1, R + 1 - centering)[::-1][None, :]
+                ).T
                 sigmasq_1 = (cmean.T / scaling).T
 
                 # Second estimation of Sigma^2; Eq 2 from ISMRM presentation
-                gamma = (n_voxels_in_patch - np.arange(R - centering, dtype=int)) / n_volumes
+                gamma = (
+                    n_voxels_in_patch - np.arange(R - centering, dtype=int)
+                ) / n_volumes
                 rangeMP = 4 * np.sqrt(gamma)
                 rangeData = vals[: R - centering + 1] - vals[R - centering - 1]
                 sigmasq_2 = (rangeData[:, None] / rangeMP[None, :]).T
@@ -959,12 +974,14 @@ def subfunction_loop_for_nvr_avg(
             else:
                 y_patch_center = int(np.round(kernel_size_y / 2)) + (y_patch - 1)
                 z_patch_center = int(np.round(kernel_size_z / 2)) + (z_patch - 1)
-                denoised_x_patch[:, y_patch_center, z_patch_center, :] += denoised_patch[
-                    0,
-                    int(np.round(denoised_patch.shape[1] / 2)),
-                    int(np.round(denoised_patch.shape[2] / 2)),
-                    :,
-                ]
+                denoised_x_patch[:, y_patch_center, z_patch_center, :] += (
+                    denoised_patch[
+                        0,
+                        int(np.round(denoised_patch.shape[1] / 2)),
+                        int(np.round(denoised_patch.shape[2] / 2)),
+                        :,
+                    ]
+                )
                 total_patch_weights[:, y_patch_center, z_patch_center] += 1
 
     return denoised_x_patch, total_patch_weights
@@ -996,7 +1013,7 @@ def subfunction_loop_for_nvr_avg_update(
     kernel_size_y : int
         Size of the kernel in the y-direction.
     lambda2 : float
-        Threshold for singular values.
+        NORDIC threshold for singular values.
         This is used for NORDIC (soft_thrs=None), but not g-factor estimation (soft_thrs=10).
     patch_avg : bool
         Hardcoded as True. Seems unrelated to patch_average.
@@ -1068,12 +1085,15 @@ def subfunction_loop_for_nvr_avg_update(
 
             k_space_patch = k_space_x_patch[:, w2_slicex, w3_slicex, :]
             # Reshape into Casorati matrix (X*Y*Z, T)
-            k_space_patch_2d = np.reshape(k_space_patch, (np.prod(k_space_patch.shape[:3]), k_space_patch.shape[3]))
+            k_space_patch_2d = np.reshape(
+                k_space_patch,
+                (np.prod(k_space_patch.shape[:3]), k_space_patch.shape[3]),
+            )
 
             U, S, V = np.linalg.svd(k_space_patch_2d, full_matrices=False)
 
-            n_removed_components = np.sum(S < lambda2)
             if soft_thrs is None:  # NORDIC
+                n_removed_components = np.sum(S < lambda2)
                 # MATLAB code used .\, which seems to be switched element-wise division
                 # MATLAB: 5 .\ 2 = 2 ./ 5
                 energy_scrub = np.sqrt(np.sum(S[S < lambda2])) / np.sqrt(np.sum(S))
@@ -1085,6 +1105,7 @@ def subfunction_loop_for_nvr_avg_update(
                 first_removed_component = n_removed_components
                 # Lots of S arrays that are *just* zeros
             elif soft_thrs != 10:
+                n_removed_components = np.sum(S < lambda2)  # wrong?
                 S = S - (lambda2 * soft_thrs)
                 S[S < 0] = 0
                 energy_scrub = 0
@@ -1095,21 +1116,31 @@ def subfunction_loop_for_nvr_avg_update(
                 n_zero_voxels_in_patch = np.sum(voxelwise_sums == 0)
                 centering = 0
                 # Correction for some zero entries
-                n_nonzero_voxels_in_patch = k_space_patch_2d.shape[0] - n_zero_voxels_in_patch
+                n_nonzero_voxels_in_patch = (
+                    k_space_patch_2d.shape[0] - n_zero_voxels_in_patch
+                )
                 if n_nonzero_voxels_in_patch > 0:
                     n_volumes = k_space_patch_2d.shape[1]
                     R = np.min((n_nonzero_voxels_in_patch, n_volumes))
-                    scaling = (max(n_nonzero_voxels_in_patch, n_volumes) - np.arange(R - centering, dtype=int)) / n_volumes
+                    scaling = (
+                        max(n_nonzero_voxels_in_patch, n_volumes)
+                        - np.arange(R - centering, dtype=int)
+                    ) / n_volumes
                     scaling = scaling.flatten()
                     vals = (S**2) / n_volumes
 
                     # First estimation of Sigma^2;  Eq 1 from ISMRM presentation
-                    csum = np.cumsum(vals[::-1][:R - centering])
-                    cmean = (csum[::-1][:R - centering] / np.arange(1, R + 1 - centering)[::-1])
+                    csum = np.cumsum(vals[::-1][: R - centering])
+                    cmean = (
+                        csum[::-1][: R - centering]
+                        / np.arange(1, R + 1 - centering)[::-1]
+                    )
                     sigmasq_1 = cmean / scaling  # 1D array with length n_volumes
 
                     # Second estimation of Sigma^2; Eq 2 from ISMRM presentation
-                    gamma = (n_nonzero_voxels_in_patch - np.arange(R - centering, dtype=int)) / n_volumes
+                    gamma = (
+                        n_nonzero_voxels_in_patch - np.arange(R - centering, dtype=int)
+                    ) / n_volumes
                     rangeMP = 4 * np.sqrt(gamma)
                     rangeData = vals[: R - centering + 1] - vals[R - centering - 1]
                     sigmasq_2 = rangeData / rangeMP  # 1D array with length n_volumes
@@ -1119,16 +1150,28 @@ def subfunction_loop_for_nvr_avg_update(
 
                     # MATLAB code used .\, which seems to be switched element-wise division
                     # MATLAB: 5 .\ 2 = 2 ./ 5
-                    energy_scrub = np.sqrt(np.sum(S[first_removed_component:])) / np.sqrt(np.sum(S))
+                    energy_scrub = np.sqrt(
+                        np.sum(S[first_removed_component:])
+                    ) / np.sqrt(np.sum(S))
 
                     S[first_removed_component:] = 0
                 else:  # all zero entries
+                    n_removed_components = S.size
                     first_removed_component = 0
                     energy_scrub = 0
                     sigmasq_2 = None
 
             else:  # SHOULD BE UNREACHABLE
-                S[np.max((1, S.shape[0] - int(np.floor(n_removed_components * soft_thrs)))) :] = 0
+                n_removed_components = np.sum(S < lambda2)
+                S[
+                    np.max(
+                        (
+                            1,
+                            S.shape[0]
+                            - int(np.floor(n_removed_components * soft_thrs)),
+                        )
+                    ) :
+                ] = 0
                 raise NotImplementedError("This block is never executed.")
 
             # Based on numpy svd documentation. Don't do np.dot(np.dot(U, np.diag(S)), V.T)!
@@ -1148,20 +1191,26 @@ def subfunction_loop_for_nvr_avg_update(
 
             if patch_avg:
                 # Update the entire patch
-                denoised_x_patch[:, w2_slicex, w3_slicex, :] = (
-                    denoised_x_patch[:, w2_slicex, w3_slicex, :] + (patch_scale * denoised_patch)
-                )
+                denoised_x_patch[:, w2_slicex, w3_slicex, :] = denoised_x_patch[
+                    :, w2_slicex, w3_slicex, :
+                ] + (patch_scale * denoised_patch)
                 # total scaling factor across patches affecting a given voxel
                 total_patch_weights[:, w2_slicex, w3_slicex] += patch_scale
                 # number of singular values *removed*
                 component_threshold[:, w2_slicex, w3_slicex] += n_removed_components
                 energy_removed[:, w2_slicex, w3_slicex] += energy_scrub
-                snr_weight[:, w2_slicex, w3_slicex] += S[0] / S[max(0, first_removed_component - 2)]
+                snr_weight[:, w2_slicex, w3_slicex] += (
+                    S[0] / S[max(0, first_removed_component - 2)]
+                )
 
                 if sigmasq_2 is not None:
                     x_patch_idx = np.arange(k_space_x_patch.shape[0])
-                    w1_slicex, w2_slicex, w3_slicex = np.ix_(x_patch_idx, y_patch_idx, z_patch_idx)
-                    noise[w1_slicex, w2_slicex, w3_slicex] += sigmasq_2[first_removed_component]
+                    w1_slicex, w2_slicex, w3_slicex = np.ix_(
+                        x_patch_idx, y_patch_idx, z_patch_idx
+                    )
+                    noise[w1_slicex, w2_slicex, w3_slicex] += sigmasq_2[
+                        first_removed_component
+                    ]
 
             else:
                 # Only update a single voxel in the middle of the patch
@@ -1178,11 +1227,19 @@ def subfunction_loop_for_nvr_avg_update(
                     ]
                 )
                 total_patch_weights[:, y_patch_center, z_patch_center] += patch_scale
-                component_threshold[:, y_patch_center, z_patch_center, :] += n_removed_components
+                component_threshold[:, y_patch_center, z_patch_center, :] += (
+                    n_removed_components
+                )
                 energy_removed[:, y_patch_center, z_patch_center] += energy_scrub
-                snr_weight[:, y_patch_center, z_patch_center] += S[0] / S[max(0, first_removed_component - 2)]
-                if sigmasq_2 is not None:  # sigmasq_2 is only defined when soft_thrs == 10
-                    noise[:, y_patch_center, z_patch_center] += sigmasq_2[first_removed_component]
+                snr_weight[:, y_patch_center, z_patch_center] += (
+                    S[0] / S[max(0, first_removed_component - 2)]
+                )
+                if (
+                    sigmasq_2 is not None
+                ):  # sigmasq_2 is only defined when soft_thrs == 10
+                    noise[:, y_patch_center, z_patch_center] += sigmasq_2[
+                        first_removed_component
+                    ]
                 raise NotImplementedError("This block is never executed.")
 
     return (
