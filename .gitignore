@@ -2,6 +2,7 @@
 figures/
 *.nii.gz
 *.mp4
+*.mat
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
