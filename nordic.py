@@ -407,6 +407,7 @@ def run_nordic(
         filtered_phase_phase_img.to_filename(out_dir / "filtered_phase_phase.nii.gz")
         del filtered_phase_phase_img
 
+        # Same as DD_phase written out by MATLAB version
         filtered_phase_real_img = nb.Nifti1Image(
             filtered_phase.real, img.affine, img.header
         )
@@ -430,7 +431,7 @@ def run_nordic(
             k_space[:, :, :, i_vol] = k_space_vol
 
     # Denoise the data with NORDIC or MP-PCA
-    reconstructed_k_space = denoise_data(
+    denoised_complex = denoise_data(
         k_space=k_space,
         kernel_size=kernel_size_pca,
         patch_overlap=patch_overlap_pca,
@@ -448,7 +449,6 @@ def run_nordic(
     )
 
     # Rescale the denoised data
-    denoised_complex = reconstructed_k_space.copy()
     denoised_complex = denoised_complex * gfactor[:, :, :, None]
     denoised_complex *= np.exp(1j * np.angle(filtered_phase))
     denoised_complex = denoised_complex * absolute_scale  # rescale the data
@@ -461,12 +461,17 @@ def run_nordic(
         gain_level = np.floor(np.log2(32000 / sn_scale))
         denoised_magn = denoised_magn * (2**gain_level)
 
+    if n_noise_vols > 0:
+        denoised_magn = denoised_magn[..., :-n_noise_vols]
+
     denoised_magn = nb.Nifti1Image(denoised_magn, img.affine, img.header)
     denoised_magn.to_filename(out_dir / "magn.nii.gz")
 
     if has_complex:
         denoised_phase = np.angle(denoised_complex)
         denoised_phase = (denoised_phase / (2 * np.pi) + range_center) * range_norm
+        if n_noise_vols > 0:
+            denoised_phase = denoised_phase[..., :-n_noise_vols]
         denoised_phase = nb.Nifti1Image(denoised_phase, img.affine, img.header)
         denoised_phase.to_filename(out_dir / "phase.nii.gz")
 
@@ -787,7 +792,7 @@ def denoise_data(
 
         energy_removed = energy_removed / total_patch_weights
         out_img = nb.Nifti1Image(energy_removed, img.affine, img.header)
-        out_img.to_filename(out_dir / "n_energy_removed.nii.gz")
+        out_img.to_filename(out_dir / "energy_removed.nii.gz")
         del energy_removed, out_img
 
         snr_weight = snr_weight / total_patch_weights
@@ -1197,11 +1202,9 @@ def subfunction_loop_for_nvr_avg_update(
                 # MATLAB: 5 .\ 2 = 2 ./ 5
                 energy_scrub = np.sqrt(np.sum(S[S < lambda_thresh])) / np.sqrt(np.sum(S))
                 S[S < lambda_thresh] = 0
-                # BUG?: This is number of zero elements in array, not last non-zero element
-                # If so, only affects SNR map.
-                # Should it be the following instead?
-                first_removed_component = S.size - n_removed_components
+                # BUG: This was number of zero elements in array, not last non-zero element
                 # first_removed_component = n_removed_components
+                first_removed_component = S.size - n_removed_components
                 # Lots of S arrays that are *just* zeros
             elif soft_thrs != 10:
                 n_removed_components = np.sum(S < lambda_thresh)  # wrong?
