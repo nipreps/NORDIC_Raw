@@ -456,7 +456,6 @@ def run_nordic(
         patch_statuses[-1] = 0
 
     print("Starting NORDIC ...")
-    master_fast = 1
     # Loop over patches in the x-direction
     # Looping over y and z happens within the sub_llr_processing function
     for i_x_patch in range(n_x_patches):
@@ -473,7 +472,6 @@ def run_nordic(
             k_space=k_space,
             patch_num=i_x_patch,
             patch_statuses=patch_statuses,
-            master=master_fast,
             total_patch_weights=total_patch_weights,
             noise=noise,
             component_threshold=component_threshold,
@@ -641,7 +639,6 @@ def estimate_gfactor(
         patch_statuses[-1] = 0
 
     print("Estimating g-factor ...")
-    master_fast = 1  # What is this?
     # Preallocate 4D array of zeros
     reconstructed_k_space = np.zeros_like(k_space)
     # Loop over patches in the x-direction
@@ -660,7 +657,6 @@ def estimate_gfactor(
             k_space=k_space,
             patch_num=i_x_patch,
             patch_statuses=patch_statuses,
-            master=master_fast,
             total_patch_weights=total_patch_weights,
             noise=gfactor,
             component_threshold=component_threshold,
@@ -727,7 +723,6 @@ def sub_llr_processing(
     reconstructed_k_space,
     k_space,
     patch_num,
-    master,
     total_patch_weights,
     patch_statuses,
     noise=None,
@@ -751,7 +746,6 @@ def sub_llr_processing(
     k_space : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
     patch_num : int
         Patch number. Each patch is processed separately.
-    master : int
     total_patch_weights : np.ndarray of shape (n_x, n_y, n_slices)
         Used to scale the outputs, including reconstructed_k_space, noise, component_threshold,
         and energy_removed.
@@ -788,7 +782,7 @@ def sub_llr_processing(
     DATA_full2 = None
     if patch_statuses[patch_num] not in (1, 3):
         # processed but not added
-        if patch_statuses[patch_num] == 2 and master == 1:
+        if patch_statuses[patch_num] == 2:
             # loading instead of processing
             # load file as soon as save, if more than 10 sec, just do the recon instead.
             data_file = f'{filename}slice{patch_num}.pkl'
@@ -814,16 +808,9 @@ def sub_llr_processing(
             # block for other processes
             patch_statuses[patch_num] = 1
             if DATA_full2 is None:
-                if master == 0:
-                    patch_statuses[patch_num] = 1  # STARTING
-                    # TODO: Check the index here
-                    k_space_x_patch = k_space[x_patch_idx, :, :, :]
-                    lambda_ = llr_scale * nvr_threshold
-                    raise NotImplementedError("This block is never executed.")
-                else:
-                    patch_statuses[patch_num] = 1  # STARTING
-                    k_space_x_patch = k_space[x_patch_idx, :, :, :]
-                    lambda_ = llr_scale * nvr_threshold
+                patch_statuses[patch_num] = 1  # STARTING
+                k_space_x_patch = k_space[x_patch_idx, :, :, :]
+                lambda_ = llr_scale * nvr_threshold
 
                 if patch_average:  # patch_average is always False
                     DATA_full2, total_patch_weights = subfunction_loop_for_nvr_avg(
@@ -872,21 +859,13 @@ def sub_llr_processing(
                     energy_removed[x_patch_idx, :, :] = energy_removed_x_patch
                     snr_weight[x_patch_idx, :, :] = snr_weight_x_patch
 
-        if master == 0:
-            if patch_statuses[patch_num] != 2:
-                data_file = f'{filename}slice{patch_num}.pkl'
-                with open(data_file, "wb") as f:
-                    pickle.dump(DATA_full2, f)
-                patch_statuses[patch_num] = 2  # COMPLETED
+        if patch_average:  # patch_average is always False
+            reconstructed_k_space[x_patch_idx, ...] += DATA_full2
             raise NotImplementedError("This block is never executed.")
         else:
-            if patch_average:  # patch_average is always False
-                reconstructed_k_space[x_patch_idx, ...] += DATA_full2
-                raise NotImplementedError("This block is never executed.")
-            else:
-                reconstructed_k_space[x_patch_idx, : n_y, ...] += DATA_full2
+            reconstructed_k_space[x_patch_idx, : n_y, ...] += DATA_full2
 
-            patch_statuses[patch_num] = 3
+        patch_statuses[patch_num] = 3
 
     return (
         reconstructed_k_space,
