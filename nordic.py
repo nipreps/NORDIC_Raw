@@ -41,12 +41,12 @@ def run_nordic(
     full_dynamic_range=False,
     temporal_phase=1,
     algorithm="nordic",
+    patch_overlap_gfactor=2,
     kernel_size_gfactor=None,
+    patch_overlap_pca=2,
     kernel_size_pca=None,
     phase_slice_average_for_kspace_centering=False,
     phase_filter_width=3,
-    nordic_patch_overlap=2,
-    gfactor_patch_overlap=2,
     save_gfactor_map=True,
     soft_thrs="auto",
     debug=False,
@@ -81,8 +81,9 @@ def run_nordic(
         Value == 3 will do the same thing as 2, but with a more aggressive mask and
         done after other steps, including g-factor normalization.
         1 was default, 3 now in dMRI due to phase errors in some data.
-    algorithm : {'nordic', 'mppca', 'mppca+nordic'}
-        'mppca+nordic': NORDIC gfactor with MP estimation. ARG.MP = 1 and ARG.NORDIC = 0
+        Recommended value for fMRI is 1. Recommended value for dMRI is 3.
+    algorithm : {'nordic', 'mppca', 'gfactor+mppca'}
+        'gfactor+mppca': NORDIC gfactor with MP estimation. ARG.MP = 1 and ARG.NORDIC = 0
         'mppca': MP without gfactor correction. ARG.MP = 2 and ARG.NORDIC = 0
         'nordic': NORDIC only. ARG.MP = 0 and ARG.NORDIC = 1
     kernel_size_gfactor : len-4 list
@@ -97,14 +98,17 @@ def run_nordic(
         Specifies the width of the smoothing filter for the phase.
         Must be an int between 1 and 10.
         Default is now 3.
+        Recommended value for fMRI is 10. Recommended value for dMRI is 3.
     save_gfactor_map : bool
-        saves the RELATIVE gfactor, 2 saves the gfactor and does not complete the NORDIC processing
-    nordic_patch_overlap
+        saves the RELATIVE gfactor. Default is True.
+    patch_overlap_pca
         Default is 2.
-    gfactor_patch_overlap
+    patch_overlap_gfactor
         Default is 2.
     soft_thrs : float or 'auto' or None
-        Default is 'auto'. This only impacts denoising step.
+        Default is 'auto', which sets the value based on the algorithm.
+        Will default to 10 for "mppca" and "gfactor+mppca" and None for "nordic".
+        This only impacts the denoising step (not the g-factor estimation step).
     debug : bool
         If True, write out intermediate files for debugging.
         Default is False.
@@ -117,7 +121,7 @@ def run_nordic(
     patch_average : bool
         Hardcoded as False in the MATLAB code (ARG.patch_average = 0).
     llr_scale : float
-        Local low-rank scaling factor for the dneoising step. Default is 1.
+        Local low-rank scaling factor for the denoising step. Default is 1.
         Hardcoded as 0 for g-factor estimation and 1 for denoising in the MATLAB code
         (ARG.llr_scale).
 
@@ -308,7 +312,7 @@ def run_nordic(
         del mag_data, pha_data
 
     # Estimate the g-factor map
-    if "nordic" in algorithm:
+    if algorithm in ("nordic", "gfactor+mppca"):
         # Reduce the number of volumes to 90 or fewer for g-factor estimation
         if kernel_size_gfactor is None:
             # Select first 90 (or fewer, if run is shorter) volumes from 4D array
@@ -320,7 +324,7 @@ def run_nordic(
         gfactor = estimate_gfactor(
             k_space=k_space,
             kernel_size=kernel_size_gfactor,
-            patch_overlap=gfactor_patch_overlap,
+            patch_overlap=patch_overlap_gfactor,
             out_dir=out_dir,
             full_dynamic_range=full_dynamic_range,
             img=img,
@@ -422,6 +426,7 @@ def run_nordic(
 
     if soft_thrs == "auto":
         if "mppca" in algorithm:
+            # mppca or gfactor+mppca
             soft_thrs = 10
         else:
             soft_thrs = None  # NORDIC (When noise is flat)
@@ -454,7 +459,7 @@ def run_nordic(
     patch_statuses = np.zeros(n_x_patches, dtype=int)
 
     if not patch_average:
-        val = max(1, int(np.floor(kernel_size[0] / nordic_patch_overlap)))
+        val = max(1, int(np.floor(kernel_size[0] / patch_overlap_pca)))
         for nw1 in range(1, val):
             patch_statuses[nw1::val] = 2
         patch_statuses[-1] = 0
@@ -481,7 +486,7 @@ def run_nordic(
             component_threshold=component_threshold,
             energy_removed=energy_removed,
             snr_weight=snr_weight,
-            patch_average_sub=nordic_patch_overlap,
+            patch_average_sub=patch_overlap_pca,
             llr_scale=llr_scale,
             filename=str(out_dir / "out"),
             kernel_size=kernel_size,
@@ -814,14 +819,14 @@ def sub_llr_processing(
             if DATA_full2 is None:
                 patch_statuses[patch_num] = 1  # STARTING
                 k_space_x_patch = k_space[x_patch_idx, :, :, :]
-                lambda_ = llr_scale * nvr_threshold
+                lambda_thresh = llr_scale * nvr_threshold
 
                 if patch_average:  # patch_average is always False
                     DATA_full2, total_patch_weights = subfunction_loop_for_nvr_avg(
                         k_space_x_patch=k_space_x_patch,
                         kernel_size_z=kernel_size[2],
                         kernel_size_y=kernel_size[1],
-                        lambda2=lambda_,
+                        lambda_thresh=lambda_thresh,
                         soft_thrs=soft_thrs,
                         total_patch_weights=total_patch_weights,
                         patch_average_sub=patch_average_sub,
@@ -845,7 +850,7 @@ def sub_llr_processing(
                         k_space_x_patch=k_space_x_patch,
                         kernel_size_z=kernel_size[2],
                         kernel_size_y=kernel_size[1],
-                        lambda2=lambda_,
+                        lambda_thresh=lambda_thresh,
                         patch_avg=True,
                         soft_thrs=soft_thrs,
                         total_patch_weights=x_patch_weights,
@@ -886,7 +891,7 @@ def subfunction_loop_for_nvr_avg(
     k_space_x_patch,
     kernel_size_z,
     kernel_size_y,
-    lambda2,
+    lambda_thresh,
     patch_avg=True,
     soft_thrs=None,
     total_patch_weights=None,
@@ -926,9 +931,9 @@ def subfunction_loop_for_nvr_avg(
             # S is 1D in Python, 2D diagonal matrix in MATLAB
             U, S, V = np.linalg.svd(k_space_patch_2d, full_matrices=False)
 
-            idx = np.sum(S < lambda2)
+            idx = np.sum(S < lambda_thresh)
             if soft_thrs is None:
-                S[S < lambda2] = 0
+                S[S < lambda_thresh] = 0
             elif soft_thrs == 10:  # Using MPPCA
                 centering = 0
                 n_voxels_in_patch = k_space_patch_2d.shape[0]
@@ -991,7 +996,7 @@ def subfunction_loop_for_nvr_avg_update(
     k_space_x_patch,
     kernel_size_z,
     kernel_size_y,
-    lambda2,
+    lambda_thresh,
     total_patch_weights,
     noise,
     component_threshold,
@@ -1012,7 +1017,7 @@ def subfunction_loop_for_nvr_avg_update(
         Size of the kernel in the z-direction.
     kernel_size_y : int
         Size of the kernel in the y-direction.
-    lambda2 : float
+    lambda_thresh : float
         NORDIC threshold for singular values.
         This is used for NORDIC (soft_thrs=None), but not g-factor estimation (soft_thrs=10).
     patch_avg : bool
@@ -1093,11 +1098,11 @@ def subfunction_loop_for_nvr_avg_update(
             U, S, V = np.linalg.svd(k_space_patch_2d, full_matrices=False)
 
             if soft_thrs is None:  # NORDIC
-                n_removed_components = np.sum(S < lambda2)
+                n_removed_components = np.sum(S < lambda_thresh)
                 # MATLAB code used .\, which seems to be switched element-wise division
                 # MATLAB: 5 .\ 2 = 2 ./ 5
-                energy_scrub = np.sqrt(np.sum(S[S < lambda2])) / np.sqrt(np.sum(S))
-                S[S < lambda2] = 0
+                energy_scrub = np.sqrt(np.sum(S[S < lambda_thresh])) / np.sqrt(np.sum(S))
+                S[S < lambda_thresh] = 0
                 # BUG?: This is number of zero elements in array, not last non-zero element
                 # If so, only affects SNR map.
                 # Should it be the following instead?
@@ -1105,8 +1110,8 @@ def subfunction_loop_for_nvr_avg_update(
                 first_removed_component = n_removed_components
                 # Lots of S arrays that are *just* zeros
             elif soft_thrs != 10:
-                n_removed_components = np.sum(S < lambda2)  # wrong?
-                S = S - (lambda2 * soft_thrs)
+                n_removed_components = np.sum(S < lambda_thresh)  # wrong?
+                S = S - (lambda_thresh * soft_thrs)
                 S[S < 0] = 0
                 energy_scrub = 0
                 first_removed_component = 0
@@ -1162,16 +1167,11 @@ def subfunction_loop_for_nvr_avg_update(
                     sigmasq_2 = None
 
             else:  # SHOULD BE UNREACHABLE
-                n_removed_components = np.sum(S < lambda2)
-                S[
-                    np.max(
-                        (
-                            1,
-                            S.shape[0]
-                            - int(np.floor(n_removed_components * soft_thrs)),
-                        )
-                    ) :
-                ] = 0
+                n_removed_components = np.sum(S < lambda_thresh)
+                first_removed_component = np.max(
+                    (1, S.shape[0] - int(np.floor(n_removed_components * soft_thrs)))
+                )
+                S[first_removed_component:] = 0
                 raise NotImplementedError("This block is never executed.")
 
             # Based on numpy svd documentation. Don't do np.dot(np.dot(U, np.diag(S)), V.T)!
@@ -1203,6 +1203,7 @@ def subfunction_loop_for_nvr_avg_update(
                     S[0] / S[max(0, first_removed_component - 2)]
                 )
 
+                # sigmasq_2 is only defined when soft_thrs == 10
                 if sigmasq_2 is not None:
                     x_patch_idx = np.arange(k_space_x_patch.shape[0])
                     w1_slicex, w2_slicex, w3_slicex = np.ix_(
@@ -1234,9 +1235,8 @@ def subfunction_loop_for_nvr_avg_update(
                 snr_weight[:, y_patch_center, z_patch_center] += (
                     S[0] / S[max(0, first_removed_component - 2)]
                 )
-                if (
-                    sigmasq_2 is not None
-                ):  # sigmasq_2 is only defined when soft_thrs == 10
+                # sigmasq_2 is only defined when soft_thrs == 10
+                if sigmasq_2 is not None:
                     noise[:, y_patch_center, z_patch_center] += sigmasq_2[
                         first_removed_component
                     ]
