@@ -155,25 +155,31 @@ def run_nordic(
 
     Other miscellany:
 
-    - np.angle(complex) returns the phase in radians.
-    - np.abs(complex) returns the magnitude.
-    - np.exp(1j * phase) returns the complex number with the given phase.
-    - mag * np.exp(1j * phase) returns the complex number.
-    - NVR = noise variance reduction
-    - LLR = locally low-rank
-    - In MATLAB, min(complex) and max(complex) use the magnitude of the complex number.
-    - In Python, min(complex) and max(complex) use the whole complex number,
-      so you need to do np.abs(complex) before np.min/np.max.
-    - In MATLAB, niftiread appears to modify the data. I ended up making a mat file
-      containing the data loaded by MATLAB and converting it to a NIfTI image using
-      Python for testing.
-    - KSP2 --> k_space
-    - KSP_recon --> reconstructed_k_space
-    - KSP_processed --> patch_statuses
-    - II --> complex_data
-    - I_M --> mag_data
-    - I_P --> pha_data
-    - DD_phase --> filtered_phase
+    -   np.angle(complex) returns the phase in radians.
+    -   np.abs(complex) returns the magnitude.
+    -   np.exp(1j * phase) returns the complex number with the given phase.
+    -   mag * np.exp(1j * phase) returns the complex number.
+    -   NVR = noise variance reduction
+    -   LLR = locally low-rank
+    -   In MATLAB, min(complex) and max(complex) use the magnitude of the complex number.
+    -   In Python, min(complex) and max(complex) use the whole complex number,
+        so you need to do np.abs(complex) before np.min/np.max.
+    -   In MATLAB, niftiread changes the data (on UPenn's cluster at least).
+        I ended up making a mat file containing the data loaded by MATLAB and
+        converting it to a NIfTI image using Python for testing.
+    -   KSP2 --> k_space
+        -   I don't actually think this is (effective) k-space data.
+            It's still in image space.
+            It might just be a scaled, filtered version of the complex data.
+    -   KSP_recon --> reconstructed_k_space
+        -   This is really the denoised complex data,
+            assuming KSP2 is the filtered complex data.
+    -   KSP_processed --> patch_statuses
+    -   II --> complex_data
+    -   I_M --> mag_data
+    -   I_P --> pha_data
+    -   DD_phase --> filtered_phase
+    -   Noise map for NORDIC is all zeros
     """
     out_dir = Path(out_dir)
 
@@ -184,7 +190,9 @@ def run_nordic(
     if pha_file:
         has_complex = True
         pha_img = nb.load(pha_file)
-        pha_data = pha_img.get_fdata().astype(np.float32)
+        pha_data = pha_img.get_fdata()
+        if mag_data.shape != pha_data.shape:
+            raise ValueError("Magnitude and phase data must have the same shape")
 
     n_noise_vols = 0
     if mag_norf_file:
@@ -195,15 +203,19 @@ def run_nordic(
 
         if has_complex and pha_norf_file:
             pha_norf_img = nb.load(pha_norf_file)
-            pha_norf_data = pha_norf_img.get_fdata().astype(np.float32)
+            pha_norf_data = pha_norf_img.get_fdata()
             pha_data = np.concatenate((pha_data, pha_norf_data), axis=3)
+            if mag_norf_data.shape != pha_norf_data.shape:
+                raise ValueError(
+                    "Magnitude and phase noRF data must have the same shape"
+                )
         elif has_complex:
             raise ValueError(
                 "If mag+phase data are provided and a mag noRF file is provided, "
                 "phase noRF file is required."
             )
 
-    # Take the absolute value of the magnitude data
+    # Take the absolute value of the magnitude data and cast to single
     mag_data = np.abs(mag_data).astype(np.float32)
 
     if has_complex:
@@ -213,6 +225,7 @@ def run_nordic(
         range_norm = phase_range - phase_range_min
         range_center = (phase_range + phase_range_min) / range_norm * 1 / 2
         pha_data = (pha_data / range_norm - range_center) * 2 * np.pi
+        pha_data = pha_data.astype(np.float32)  # cast to single
         print("Phase range: ", np.min(pha_data), np.max(pha_data))
 
         # Combine magnitude and phase into complex-valued data
@@ -382,10 +395,23 @@ def run_nordic(
                 filtered_phase[:, :, i_slice, j_vol] = temp_filtered_phase_slice
 
     if debug:
-        filtered_phase_img = nb.Nifti1Image(
-            filtered_phase.astype(float), img.affine, img.header
+        filtered_phase_magn_img = nb.Nifti1Image(
+            np.abs(filtered_phase), img.affine, img.header
         )
-        filtered_phase_img.to_filename(out_dir / "filtered_phase.nii.gz")
+        filtered_phase_magn_img.to_filename(out_dir / "filtered_phase_magn.nii.gz")
+        del filtered_phase_magn_img
+
+        filtered_phase_phase_img = nb.Nifti1Image(
+            np.angle(filtered_phase), img.affine, img.header
+        )
+        filtered_phase_phase_img.to_filename(out_dir / "filtered_phase_phase.nii.gz")
+        del filtered_phase_phase_img
+
+        filtered_phase_real_img = nb.Nifti1Image(
+            filtered_phase.real, img.affine, img.header
+        )
+        filtered_phase_real_img.to_filename(out_dir / "filtered_phase_real.nii.gz")
+        del filtered_phase_real_img
 
     k_space = k_space * np.exp(-1j * np.angle(filtered_phase))
     k_space[np.isnan(k_space)] = 0
@@ -403,159 +429,25 @@ def run_nordic(
             ) / np.sqrt(2)
             k_space[:, :, :, i_vol] = k_space_vol
 
-    reconstructed_k_space = np.zeros_like(k_space)
-    kernel_size = np.ones(3, dtype=int) * int(np.round(np.cbrt(n_vols * 11)))
-    if kernel_size_pca is not None:
-        if not np.array_equal(kernel_size_pca, kernel_size):
-            print(
-                f"Changing kernel size from {kernel_size} to "
-                f"{kernel_size_pca} for PCA"
-            )
-        kernel_size = [int(i) for i in kernel_size_pca]
+    # Denoise the data with NORDIC or MP-PCA
+    reconstructed_k_space = denoise_data(
+        k_space=k_space,
+        kernel_size=kernel_size_pca,
+        patch_overlap=patch_overlap_pca,
+        out_dir=out_dir,
+        patch_average=patch_average,
+        measured_noise=measured_noise,
+        factor_error=factor_error,
+        has_complex=has_complex,
+        algorithm=algorithm,
+        soft_thrs=soft_thrs,
+        img=img,
+        llr_scale=llr_scale,
+        scale_patches=scale_patches,
+        debug=debug,
+    )
 
-    if n_slices <= kernel_size[2]:  # Number of slices is less than cubic kernel
-        old_kernel_size = kernel_size[:]
-        kernel_size = np.ones(3, dtype=int) * int(
-            np.round(np.sqrt(n_vols * 11 / n_slices))
-        )
-        kernel_size[2] = n_slices
-        print(
-            f"Number of slices is less than cubic kernel. "
-            f"Changing kernel size from {old_kernel_size} to {kernel_size} for PCA"
-        )
-
-    if soft_thrs == "auto":
-        if "mppca" in algorithm:
-            # mppca or gfactor+mppca
-            soft_thrs = 10
-        else:
-            soft_thrs = None  # NORDIC (When noise is flat)
-
-    # Build threshold from mean first singular value of random data
-    n_iters = 10
-    nvr_threshold = 0
-    for _ in range(n_iters):
-        _, S, _ = np.linalg.svd(np.random.normal(size=(np.prod(kernel_size), n_vols)))
-        nvr_threshold += S[0]
-
-    nvr_threshold /= n_iters
-
-    # Scale NVR threshold by measured noise level and error factor
-    nvr_threshold *= measured_noise * factor_error
-    if has_complex:
-        # Scale NVR threshold for complex data
-        # Since measured_noise is scaled by sqrt(2) earlier and is only used for nvr_threshold,
-        # why not just keep it as-is?
-        nvr_threshold *= np.sqrt(2)
-
-    total_patch_weights = np.zeros(k_space.shape[:3], dtype=int)
-    noise = np.zeros_like(k_space[..., 0])  # complex
-    component_threshold = np.zeros(k_space.shape[:3], dtype=float)
-    energy_removed = np.zeros(k_space.shape[:3], dtype=float)
-    snr_weight = np.zeros(k_space.shape[:3], dtype=float)
-
-    n_x_patches = n_x - kernel_size[0]
-    # Reset KSP_processed (now called patch_statuses) to zeros for next stage
-    patch_statuses = np.zeros(n_x_patches, dtype=int)
-
-    if not patch_average:
-        val = max(1, int(np.floor(kernel_size[0] / patch_overlap_pca)))
-        for nw1 in range(1, val):
-            patch_statuses[nw1::val] = 2
-        patch_statuses[-1] = 0
-
-    print("Starting NORDIC ...")
-    # Loop over patches in the x-direction
-    # Looping over y and z happens within the sub_llr_processing function
-    for i_x_patch in range(n_x_patches):
-        (
-            reconstructed_k_space,
-            _,
-            total_patch_weights,
-            noise,
-            component_threshold,
-            energy_removed,
-            snr_weight,
-        ) = sub_llr_processing(
-            reconstructed_k_space=reconstructed_k_space,
-            k_space=k_space,
-            patch_num=i_x_patch,
-            patch_statuses=patch_statuses,
-            total_patch_weights=total_patch_weights,
-            noise=noise,
-            component_threshold=component_threshold,
-            energy_removed=energy_removed,
-            snr_weight=snr_weight,
-            patch_average_sub=patch_overlap_pca,
-            llr_scale=llr_scale,
-            filename=str(out_dir / "out"),
-            kernel_size=kernel_size,
-            nvr_threshold=nvr_threshold,
-            patch_average=patch_average,
-            scale_patches=scale_patches,
-            soft_thrs=soft_thrs,
-        )
-
-    # Assumes that the combination is with N instead of sqrt(N). Works for NVR not MPPCA.
-    # These arrays are summed over patches and need to be scaled by the patch scaling factor,
-    # which is typically just the number of patches that contribute to each voxel.
-    reconstructed_k_space = reconstructed_k_space / total_patch_weights[..., None]
-    print("Completed NORDIC")
-
-    if debug:
-        # Write out reconstructed_k_space
-        nordic_mag = np.abs(reconstructed_k_space)
-        nordic_mag_img = nb.Nifti1Image(nordic_mag, img.affine, img.header)
-        nordic_mag_img.to_filename(out_dir / "magn_nordic.nii.gz")
-        del nordic_mag, nordic_mag_img
-
-        if has_complex:
-            nordic_pha = np.angle(reconstructed_k_space)
-            nordic_pha = (nordic_pha / (2 * np.pi) + range_center) * range_norm
-            nordic_pha_img = nb.Nifti1Image(nordic_pha, img.affine, img.header)
-            nordic_pha_img.to_filename(out_dir / "phase_nordic.nii.gz")
-            del nordic_pha, nordic_pha_img
-
-    if debug:
-        noise = np.sqrt(noise / total_patch_weights)
-        out_img = nb.Nifti1Image(noise, img.affine, img.header)
-        out_img.to_filename(out_dir / "noise.nii.gz")
-        del noise, out_img
-
-        energy_removed = energy_removed / total_patch_weights
-        out_img = nb.Nifti1Image(energy_removed, img.affine, img.header)
-        out_img.to_filename(out_dir / "n_energy_removed.nii.gz")
-        del energy_removed, out_img
-
-        snr_weight = snr_weight / total_patch_weights
-        out_img = nb.Nifti1Image(snr_weight, img.affine, img.header)
-        out_img.to_filename(out_dir / "snr_weight.nii.gz")
-        del snr_weight, out_img
-
-        # Write out number of components removed
-        component_threshold = component_threshold / total_patch_weights
-        out_img = nb.Nifti1Image(component_threshold, img.affine, img.header)
-        out_img.to_filename(out_dir / "n_components_removed.nii.gz")
-        del component_threshold, out_img
-
-        out_img = nb.Nifti1Image(total_patch_weights, img.affine, img.header)
-        out_img.to_filename(out_dir / "n_patch_runs.nii.gz")
-        del total_patch_weights, out_img
-
-        residual = k_space - reconstructed_k_space
-
-        # Split residuals into magnitude and phase
-        residual_magn = np.abs(residual)
-        residual_magn_img = nb.Nifti1Image(residual_magn, img.affine, img.header)
-        residual_magn_img.to_filename(out_dir / "residual_magn.nii.gz")
-        del residual_magn, residual_magn_img
-
-        if has_complex:
-            residual_phase = np.angle(residual)
-            residual_phase_img = nb.Nifti1Image(residual_phase, img.affine, img.header)
-            residual_phase_img.to_filename(out_dir / "residual_phase.nii.gz")
-            del residual, residual_phase, residual_phase_img
-
+    # Rescale the denoised data
     denoised_complex = reconstructed_k_space.copy()
     denoised_complex = denoised_complex * gfactor[:, :, :, None]
     denoised_complex *= np.exp(1j * np.angle(filtered_phase))
@@ -712,20 +604,222 @@ def estimate_gfactor(
 
     if save_gfactor_map:
         # Convert complex-valued g-factor to magnitude (absolute)
-        gfactor_magnitude = np.abs(gfactor)
-        gfactor_magnitude[np.isnan(gfactor_magnitude)] = 0
+        gfactor_magn = np.abs(gfactor)
+        gfactor_magn[np.isnan(gfactor_magn)] = 0
 
         if full_dynamic_range:
-            tmp = np.sort(gfactor_magnitude.flatten())
+            tmp = np.sort(gfactor_magn.flatten())
             # added -1 to match MATLAB indexing
             sn_scale = 2 * tmp[int(np.round(0.99 * len(tmp))) - 1]
             gain_level = np.floor(np.log2(32000 / sn_scale))
-            gfactor_magnitude = gfactor_magnitude * (2**gain_level)
+            gfactor_magn = gfactor_magn * (2**gain_level)
 
-        gfactor_img = nb.Nifti1Image(gfactor_magnitude, img.affine, img.header)
+        gfactor_img = nb.Nifti1Image(gfactor_magn, img.affine, img.header)
         gfactor_img.to_filename(out_dir / "gfactor.nii.gz")
 
     return gfactor
+
+
+def denoise_data(
+    k_space,
+    kernel_size,
+    patch_overlap,
+    out_dir,
+    patch_average,
+    measured_noise,
+    factor_error,
+    has_complex,
+    algorithm,
+    soft_thrs,
+    img,
+    llr_scale,
+    scale_patches,
+    debug=False,
+):
+    """Denoise the data using NORDIC.
+
+    Parameters
+    ----------
+    k_space : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+        The complex-valued k-space(?) data.
+    kernel_size : len-3 list or None
+        The size of the kernel to use for PCA.
+        Default is None.
+    patch_overlap : int
+        Default is 2.
+    out_dir : str
+        Path to the output directory.
+    patch_average : bool
+        Default is False.
+    measured_noise : float
+        The estimated noise level.
+    factor_error : float
+        The error factor.
+    has_complex : bool
+        Whether the data is complex-valued.
+    algorithm : {'nordic', 'mppca', 'gfactor+mppca'}
+        The denoising algorithm to use.
+    soft_thrs : float or 'auto' or None
+        The soft threshold to use.
+    img : nibabel.Nifti1Image
+        The NIfTI image object to use for the affine and header.
+    llr_scale : float
+        The local low-rank scaling factor.
+    scale_patches : bool
+        Whether to scale the patches.
+    debug : bool
+        Default is False.
+
+    Returns
+    -------
+    reconstructed_k_space : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+        The denoised complex-valued k-space data.
+    """
+    n_x, _, n_slices, n_vols = k_space.shape
+
+    reconstructed_k_space = np.zeros_like(k_space)
+    auto_kernel_size = np.ones(3, dtype=int) * int(np.round(np.cbrt(n_vols * 11)))
+    if kernel_size is not None:
+        if not np.array_equal(kernel_size, auto_kernel_size):
+            print(
+                f"Changing kernel size from {auto_kernel_size} to "
+                f"{kernel_size} for PCA"
+            )
+        kernel_size = [int(i) for i in kernel_size]
+    else:
+        kernel_size = auto_kernel_size
+
+    if n_slices <= kernel_size[2]:  # Number of slices is less than cubic kernel
+        old_kernel_size = kernel_size[:]
+        kernel_size = np.ones(3, dtype=int) * int(
+            np.round(np.sqrt(n_vols * 11 / n_slices))
+        )
+        kernel_size[2] = n_slices
+        print(
+            f"Number of slices is less than cubic kernel. "
+            f"Changing kernel size from {old_kernel_size} to {kernel_size} for PCA"
+        )
+
+    if soft_thrs == "auto":
+        if "mppca" in algorithm:
+            # mppca or gfactor+mppca
+            soft_thrs = 10
+        else:
+            # NORDIC (When noise is flat)
+            soft_thrs = None
+
+    # Build threshold from mean first singular value of random data
+    n_iters = 10
+    nvr_threshold = 0
+    for _ in range(n_iters):
+        _, S, _ = np.linalg.svd(np.random.normal(size=(np.prod(kernel_size), n_vols)))
+        nvr_threshold += S[0]
+
+    nvr_threshold /= n_iters
+
+    # Scale NVR threshold by measured noise level and error factor
+    nvr_threshold *= measured_noise * factor_error
+    if has_complex:
+        # Scale NVR threshold for complex data
+        # Since measured_noise is scaled by sqrt(2) earlier and is only used for nvr_threshold,
+        # why not just keep it as-is?
+        nvr_threshold *= np.sqrt(2)
+
+    total_patch_weights = np.zeros(k_space.shape[:3], dtype=int)
+    noise = np.zeros_like(k_space[..., 0])  # complex
+    component_threshold = np.zeros(k_space.shape[:3], dtype=float)
+    energy_removed = np.zeros(k_space.shape[:3], dtype=float)
+    snr_weight = np.zeros(k_space.shape[:3], dtype=float)
+
+    n_x_patches = n_x - kernel_size[0]
+    # Reset KSP_processed (now called patch_statuses) to zeros for next stage
+    patch_statuses = np.zeros(n_x_patches, dtype=int)
+
+    if not patch_average:
+        val = max(1, int(np.floor(kernel_size[0] / patch_overlap)))
+        for nw1 in range(1, val):
+            patch_statuses[nw1::val] = 2
+        patch_statuses[-1] = 0
+
+    print("Starting NORDIC ...")
+    # Loop over patches in the x-direction
+    # Looping over y and z happens within the sub_llr_processing function
+    for i_x_patch in range(n_x_patches):
+        (
+            reconstructed_k_space,
+            _,
+            total_patch_weights,
+            noise,
+            component_threshold,
+            energy_removed,
+            snr_weight,
+        ) = sub_llr_processing(
+            reconstructed_k_space=reconstructed_k_space,
+            k_space=k_space,
+            patch_num=i_x_patch,
+            patch_statuses=patch_statuses,
+            total_patch_weights=total_patch_weights,
+            noise=noise,
+            component_threshold=component_threshold,
+            energy_removed=energy_removed,
+            snr_weight=snr_weight,
+            patch_average_sub=patch_overlap,
+            llr_scale=llr_scale,
+            filename=str(out_dir / "out"),
+            kernel_size=kernel_size,
+            nvr_threshold=nvr_threshold,
+            patch_average=patch_average,
+            scale_patches=scale_patches,
+            soft_thrs=soft_thrs,
+        )
+
+    # Assumes that the combination is with N instead of sqrt(N). Works for NVR not MPPCA.
+    # These arrays are summed over patches and need to be scaled by the patch scaling factor,
+    # which is typically just the number of patches that contribute to each voxel.
+    reconstructed_k_space = reconstructed_k_space / total_patch_weights[..., None]
+    print("Completed NORDIC")
+
+    if debug:
+        noise_magn = np.abs(np.sqrt(noise / total_patch_weights))
+        out_img = nb.Nifti1Image(noise_magn, img.affine, img.header)
+        out_img.to_filename(out_dir / "noise.nii.gz")
+        del noise, noise_magn, out_img
+
+        energy_removed = energy_removed / total_patch_weights
+        out_img = nb.Nifti1Image(energy_removed, img.affine, img.header)
+        out_img.to_filename(out_dir / "n_energy_removed.nii.gz")
+        del energy_removed, out_img
+
+        snr_weight = snr_weight / total_patch_weights
+        out_img = nb.Nifti1Image(snr_weight, img.affine, img.header)
+        out_img.to_filename(out_dir / "snr_weight.nii.gz")
+        del snr_weight, out_img
+
+        # Write out number of components removed
+        component_threshold = component_threshold / total_patch_weights
+        out_img = nb.Nifti1Image(component_threshold, img.affine, img.header)
+        out_img.to_filename(out_dir / "n_components_removed.nii.gz")
+        del component_threshold, out_img
+
+        out_img = nb.Nifti1Image(total_patch_weights, img.affine, img.header)
+        out_img.to_filename(out_dir / "n_patch_runs.nii.gz")
+        del total_patch_weights, out_img
+
+        residual = k_space - reconstructed_k_space
+
+        # Split residuals into magnitude and phase
+        residual_magn = np.abs(residual)
+        residual_magn_img = nb.Nifti1Image(residual_magn, img.affine, img.header)
+        residual_magn_img.to_filename(out_dir / "residual_magn.nii.gz")
+        del residual_magn, residual_magn_img
+
+        if has_complex:
+            residual_phase = np.angle(residual)
+            residual_phase_img = nb.Nifti1Image(residual_phase, img.affine, img.header)
+            residual_phase_img.to_filename(out_dir / "residual_phase.nii.gz")
+            del residual, residual_phase, residual_phase_img
+
+    return reconstructed_k_space
 
 
 def sub_llr_processing(
@@ -1106,8 +1200,8 @@ def subfunction_loop_for_nvr_avg_update(
                 # BUG?: This is number of zero elements in array, not last non-zero element
                 # If so, only affects SNR map.
                 # Should it be the following instead?
-                # first_removed_component = S.size - n_removed_components
-                first_removed_component = n_removed_components
+                first_removed_component = S.size - n_removed_components
+                # first_removed_component = n_removed_components
                 # Lots of S arrays that are *just* zeros
             elif soft_thrs != 10:
                 n_removed_components = np.sum(S < lambda_thresh)  # wrong?
