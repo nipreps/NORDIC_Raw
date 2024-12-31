@@ -181,6 +181,10 @@ def run_nordic(
     -   DD_phase --> filtered_phase
     -   Noise map for NORDIC is all zeros
     """
+    assert algorithm in ("nordic", "mppca", "gfactor+mppca")
+    assert temporal_phase in (0, 1, 2, 3)
+    assert phase_filter_width in range(1, 11)
+
     out_dir = Path(out_dir)
 
     img = nb.load(mag_file)
@@ -245,63 +249,20 @@ def run_nordic(
 
     print("Estimating slice-dependent phases ...")
 
-    # Create mean 3D array from all non-noise volumes of shape (X, Y, Z)
-    # XXX: What is meanphase?
-    meanphase = np.mean(complex_data[..., :-n_noise_vols], axis=3)
-    # Multiply the mean array by either 1 or 0 (default is 0)
-    meanphase = meanphase * phase_slice_average_for_kspace_centering
-    # Now this is just an array of all -0.+0.j
-    # np.exp(-1j * np.angle(meanphase[..., None])) is just an array of all 1.+0.j
+    if phase_slice_average_for_kspace_centering:
+        # Create mean 3D array from all non-noise volumes of shape (X, Y, Z)
+        # XXX: What is meanphase?
+        meanphase = np.mean(complex_data[..., :-n_noise_vols], axis=3)
+    else:
+        # This is just an array of all -0.+0.j
+        # np.exp(-1j * np.angle(meanphase[..., None])) is just an array of all 1.+0.j
+        meanphase = np.zeros_like(complex_data[..., 0])
 
-    # Preallocate 4D array of zeros
-    # XXX: WHAT IS filtered_phase?
-    # XXX: filtered_phase results are very similar between MATLAB and Python at this point.
-    # The difference image looks like white noise.
-    filtered_phase = np.zeros_like(complex_data)
-
-    # If the temporal phase is 1 - 3, smooth the phase data
-    # Except it's not just the phase data???
-    if temporal_phase > 0:
-        # Loop over slices backwards
-        for i_slice in range(n_slices)[::-1]:
-            # Loop over volumes forward, including the noise volumes(???)
-            for j_vol in range(n_vols):
-                # Grab the 2D slice of the 4D array
-                slice_data = complex_data[:, :, i_slice, j_vol]
-
-                # Apply 1D FFT to the 2D slice
-                for k_dim in range(2):
-                    slice_data = np.fft.ifftshift(
-                        np.fft.ifft(
-                            np.fft.ifftshift(slice_data, axes=[k_dim]),
-                            n=None,
-                            axis=k_dim,
-                        ),
-                        axes=[k_dim],
-                    )
-
-                # Apply Tukey window to the filtered 2D slice
-                # I've checked that this works on simulated data.
-                # tmp = bsxfun(@times,tmp,reshape(tukeywin(n_y,1).^phase_filter_width,[1 n_y]));
-                tukey_window = tukey(n_y, 1) ** phase_filter_width
-                tukey_window_reshaped = tukey_window.reshape(1, n_y)
-                slice_data = slice_data * tukey_window_reshaped
-                # tmp = bsxfun(@times,tmp,reshape(tukeywin(n_x,1).^phase_filter_width,[n_x 1]));
-                tukey_window = tukey(n_x, 1).T ** phase_filter_width
-                tukey_window_reshaped = tukey_window.reshape(n_x, 1)
-                slice_data = slice_data * tukey_window_reshaped
-
-                # Apply 1D IFFT to the filtered 2D slice and store in the 4D array
-                for k_dim in range(2):
-                    slice_data = np.fft.fftshift(
-                        np.fft.fft(
-                            np.fft.fftshift(slice_data, axes=[k_dim]),
-                            n=None,
-                            axis=k_dim,
-                        ),
-                        axes=[k_dim],
-                    )
-                filtered_phase[:, :, i_slice, j_vol] = slice_data
+    filtered_phase = filter_phase(
+        complex_data=complex_data,
+        phase_filter_width=phase_filter_width,
+        temporal_phase=temporal_phase,
+    )
 
     # Multiply the 4D array by the exponential of the angle of the filtered phase
     # np.angle(complex) = phase in real radian values
@@ -476,6 +437,97 @@ def run_nordic(
         denoised_phase.to_filename(out_dir / "phase.nii.gz")
 
     print("Done!")
+
+
+def filter_phase(complex_data, phase_filter_width, temporal_phase):
+    """Filter the phase data.
+
+    Parameters
+    ----------
+    complex_data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+        The complex-valued data.
+    phase_filter_width : int
+        Specifies the width of the smoothing filter for the phase.
+        Must be an int between 1 and 10.
+    temporal_phase : {1, 2, 3}
+        Correction for slice and time-specific phase.
+        Values > 0 will calculate a standard low-pass filtered phase map.
+        Value == 2 will perform a secondary step for filtered phase with residual spikes.
+        Value == 3 will do the same thing as 2, but with a more aggressive mask and
+        done after other steps, including g-factor normalization.
+        1 was default, 3 now in dMRI due to phase errors in some data.
+        Recommended value for fMRI is 1. Recommended value for dMRI is 3.
+
+    Returns
+    -------
+    filtered_phase : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+        The filtered phase data.
+    """
+    n_x, n_y, n_slices, n_vols = complex_data.shape
+
+    # Preallocate 4D array of zeros
+    # XXX: WHAT IS filtered_phase?
+    # XXX: filtered_phase results are very similar between MATLAB and Python at this point.
+    # The difference image looks like white noise.
+    filtered_phase = np.zeros_like(complex_data)
+
+    # If the temporal phase is 1 - 3, smooth the phase data
+    # Except it's not just the phase data???
+    if temporal_phase > 0:
+        # Loop over slices backwards
+        for i_slice in range(n_slices)[::-1]:
+            # Loop over volumes forward, including the noise volumes(???)
+            for j_vol in range(n_vols):
+                # Grab the 2D slice of the 4D array
+                slice_data = complex_data[:, :, i_slice, j_vol]
+
+                # Apply 1D FFT to the 2D slice
+                for k_dim in range(2):
+                    slice_data = np.fft.ifftshift(
+                        np.fft.ifft(
+                            np.fft.ifftshift(slice_data, axes=[k_dim]),
+                            n=None,
+                            axis=k_dim,
+                        ),
+                        axes=[k_dim],
+                    )
+
+                # Apply Tukey window to the filtered 2D slice
+                # I've checked that this works on simulated data.
+                # tmp = bsxfun(@times,tmp,reshape(tukeywin(n_y,1).^phase_filter_width,[1 n_y]));
+                tukey_window = tukey(n_y, 1) ** phase_filter_width
+                tukey_window_reshaped = tukey_window.reshape(1, n_y)
+                slice_data = slice_data * tukey_window_reshaped
+                # tmp = bsxfun(@times,tmp,reshape(tukeywin(n_x,1).^phase_filter_width,[n_x 1]));
+                tukey_window = tukey(n_x, 1).T ** phase_filter_width
+                tukey_window_reshaped = tukey_window.reshape(n_x, 1)
+                slice_data = slice_data * tukey_window_reshaped
+
+                # Apply 1D IFFT to the filtered 2D slice and store in the 4D array
+                for k_dim in range(2):
+                    slice_data = np.fft.fftshift(
+                        np.fft.fft(
+                            np.fft.fftshift(slice_data, axes=[k_dim]),
+                            n=None,
+                            axis=k_dim,
+                        ),
+                        axes=[k_dim],
+                    )
+                filtered_phase[:, :, i_slice, j_vol] = slice_data
+
+    # Secondary step for filtered phase with residual spikes
+    if temporal_phase == 2:
+        for i_slice in range(n_slices)[::-1]:
+            for j_vol in range(n_vols):
+                slice_data = complex_data[:, :, i_slice, j_vol]
+                filtered_phase_slice = filtered_phase[:, :, i_slice, j_vol]
+                phase_diff = np.angle(slice_data / filtered_phase_slice)
+                mask = np.abs(phase_diff) > 1
+                temp_filtered_phase_slice = filtered_phase_slice.copy()
+                temp_filtered_phase_slice[mask] = slice_data[mask]
+                filtered_phase[:, :, i_slice, j_vol] = temp_filtered_phase_slice
+
+    return filtered_phase
 
 
 def estimate_gfactor(
