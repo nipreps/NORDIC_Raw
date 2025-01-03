@@ -8,12 +8,12 @@ import numpy as np
 from scipy.signal.windows import tukey
 
 
-def estimate_noise_level(norf_data, is_complex=False):
+def estimate_noise_level(noise_data, is_complex=False):
     """Estimate the noise level in a noise scan file.
 
     Parameters
     ----------
-    norf_data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    noise_data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
         The no-excitation volumes from a noRF file.
     is_complex : bool
         If True, the data is complex-valued. Default is False.
@@ -23,9 +23,9 @@ def estimate_noise_level(norf_data, is_complex=False):
     noise_level : float
         The estimated noise level.
     """
-    norf_data[np.isnan(norf_data)] = 0
-    norf_data[np.isinf(norf_data)] = 0
-    noise_level = np.std(norf_data[norf_data != 0])
+    noise_data[np.isnan(noise_data)] = 0
+    noise_data[np.isinf(noise_data)] = 0
+    noise_level = np.std(noise_data[noise_data != 0])
     if is_complex:
         noise_level = noise_level / np.sqrt(2)
     return noise_level
@@ -74,7 +74,7 @@ def run_nordic(
         Rather than modifying the gfactor map, this changes nvr_threshold.
     full_dynamic_range : bool
         False keep the input scale, output maximizes range. Default is False.
-    temporal_phase : {1, 2, 3}
+    temporal_phase : {0, 1, 2, 3}
         Correction for slice and time-specific phase.
         Values > 0 will calculate a standard low-pass filtered phase map.
         Value == 2 will perform a secondary step for filtered phase with residual spikes.
@@ -127,6 +127,39 @@ def run_nordic(
 
     Notes
     -----
+    The detailed procedure, based on the code, is as follows:
+
+    1.  Scale the phase data to -pi to pi.
+    2.  Combine the magnitude and phase data into complex-valued data.
+    3.  Normalize the complex data by the minimum non-zero magnitude in the first volume.
+    4.  Calculate "meanphase" (unused) as the mean of the complex data (ignoring noise volumes).
+    5.  Filter the phase data.
+    6.  Multiply the complex data by the exponential of the angle of the filtered phase
+        to get "k-space" data.
+    7.  Limit the number of volumes to 90 or fewer for g-factor estimation.
+    8.  Estimate the g-factor map from the k-space data.
+        -   The formula is designed for GRAPPA reconstruction and detailed in
+            Breuer et al. (2009).
+        -   This reflects noise amplification from the mathematical algorithm
+            used to resolve aliased signals in accelerated acquisitions.
+        -   Discard this version of the k-space data.
+    9.  Identify if there are any zero elements in the g-factor map.
+    10. Normalize the complex data by the g-factor map.
+    11. Recalculate the k-space data using the normalized complex data and the meanphase.
+    12. Estimate the noise level from the noise volumes of the k-space data.
+    13. If temporal_phase is 3, perform a secondary step for filtered phase with residual spikes.
+    14. Multiply the k-space data by the exponential of the angle of the filtered phase.
+    15. If there are zero elements, fill them in with random noise.
+    16. Create an NVR threshold from 10 random arrays in the shape of the Casorati matrix.
+        Scale the NVR threshold using factor_error and the measured noise level.
+        Plus sqrt if data are complex.
+    17. Patch-based denoising.
+    18. Rescale the denoised data by the g-factor map, then the filtered phase,
+        then the "absolute scale" from step 3.
+    19. For the magnitude data, if full_dynamic_range is True,
+        scale the data using a "gain level".
+    20. For the phase data, scale the data by the original range and center.
+
     The basic procedure, per Vizioli et al. (2021), is as follows:
 
     1.  Estimate the geometry-factor (g-factor) noise map based on Moeller et al. (2020).
@@ -167,11 +200,11 @@ def run_nordic(
     -   In MATLAB, niftiread changes the data (on UPenn's cluster at least).
         I ended up making a mat file containing the data loaded by MATLAB and
         converting it to a NIfTI image using Python for testing.
-    -   KSP2 --> k_space
+    -   KSP2 --> demod_complex_data
         -   I don't actually think this is (effective) k-space data.
             It's still in image space.
             It might just be a scaled, filtered version of the complex data.
-    -   KSP_recon --> reconstructed_k_space
+    -   KSP_recon --> denoised_data
         -   This is really the denoised complex data,
             assuming KSP2 is the filtered complex data.
     -   KSP_processed --> patch_statuses
@@ -239,7 +272,10 @@ def run_nordic(
 
     n_x, n_y, n_slices, n_vols = complex_data.shape
 
-    # Find the minimum non-zero magnitude in the first volume and divide the complex data by it
+    # Find the minimum non-zero magnitude in the first volume and divide the complex data by it.
+    # RS: The minimal non-zero value seems arbitrary.
+    # TS: May be trying to address the same problem as demeaning described in
+    # https://github.com/MRtrix3/mrtrix3/issues/3023.
     first_volume = np.abs(complex_data[..., 0])
     absolute_scale = np.min(first_volume[first_volume != 0])
     complex_data = complex_data / absolute_scale
@@ -259,27 +295,28 @@ def run_nordic(
         meanphase = np.zeros_like(complex_data[..., 0])
 
     filtered_phase = filter_phase(
-        complex_data=complex_data,
+        data=complex_data,
         phase_filter_width=phase_filter_width,
         temporal_phase=temporal_phase,
     )
 
     # Multiply the 4D array by the exponential of the angle of the filtered phase
+    # This demodulates gross phase differences in the complex data.
     # np.angle(complex) = phase in real radian values
-    k_space = complex_data * np.exp(-1j * np.angle(filtered_phase))
+    demod_complex_data = complex_data * np.exp(-1j * np.angle(filtered_phase))
     # Replace NaNs and Infs with zeros
-    k_space[np.isnan(k_space)] = 0
-    k_space[np.isinf(k_space)] = 0
+    demod_complex_data[np.isnan(demod_complex_data)] = 0
+    demod_complex_data[np.isinf(demod_complex_data)] = 0
 
     print("Completed estimating slice-dependent phases")
 
     # Write out corrected magnitude and phase images
     if has_complex and debug:
-        mag_data = np.abs(k_space * absolute_scale)
+        mag_data = np.abs(demod_complex_data * absolute_scale)
         mag_img = nb.Nifti1Image(mag_data, img.affine, img.header)
         mag_img.to_filename(out_dir / "magn_pregfactor_normalized.nii.gz")
 
-        pha_data = np.angle(k_space * absolute_scale)
+        pha_data = np.angle(demod_complex_data * absolute_scale)
         pha_data = (pha_data / (2 * np.pi) + range_center) * range_norm
         pha_img = nb.Nifti1Image(pha_data, img.affine, img.header)
         pha_img.to_filename(out_dir / "phase_pregfactor_normalized.nii.gz")
@@ -290,13 +327,13 @@ def run_nordic(
         # Reduce the number of volumes to 90 or fewer for g-factor estimation
         if kernel_size_gfactor is None:
             # Select first 90 (or fewer, if run is shorter) volumes from 4D array
-            k_space = k_space[:, :, :, : min(90, n_vols + 1)]
+            demod_complex_data = demod_complex_data[:, :, :, : min(90, n_vols + 1)]
         else:
             # Select first N volumes from 4D array, based on kernel_size_gfactor(4)
-            k_space = k_space[:, :, :, : min(kernel_size_gfactor[3], n_vols + 1)]
+            demod_complex_data = demod_complex_data[:, :, :, : min(kernel_size_gfactor[3], n_vols + 1)]
 
         gfactor = estimate_gfactor(
-            k_space=k_space,
+            data=demod_complex_data,
             kernel_size=kernel_size_gfactor,
             patch_overlap=patch_overlap_gfactor,
             out_dir=out_dir,
@@ -310,26 +347,26 @@ def run_nordic(
         # MPPCA mode doesn't use g-factor correction
         gfactor = np.ones((n_x, n_y, n_slices))
 
-    del k_space
+    del demod_complex_data
 
-    data_has_zero_elements = 0
+    data_has_zero_elements = False
     if np.sum(gfactor == 0) > 0:
         gfactor[np.isnan(gfactor)] = 0
         gfactor[gfactor < 1] = np.median(gfactor[gfactor != 0])
-        data_has_zero_elements = 1
+        data_has_zero_elements = True
 
-    # Overwrite k_space with the original data
+    # Overwrite demod_complex_data with the original data
     # meanphase isn't anything useful (just complex-valued zeros)
-    k_space = complex_data.copy() * np.exp(-1j * np.angle(meanphase[..., None]))
-    k_space = k_space / gfactor[..., None]
+    demod_complex_data = complex_data.copy() * np.exp(-1j * np.angle(meanphase[..., None]))
+    demod_complex_data = demod_complex_data / gfactor[..., None]
 
     # Write out corrected magnitude and phase images
     if has_complex and debug:
-        mag_data = np.abs(k_space * absolute_scale)
+        mag_data = np.abs(demod_complex_data * absolute_scale)
         mag_img = nb.Nifti1Image(mag_data, img.affine, img.header)
         mag_img.to_filename(out_dir / "magn_gfactor_normalized.nii.gz")
 
-        pha_data = np.angle(k_space * absolute_scale)
+        pha_data = np.angle(demod_complex_data * absolute_scale)
         pha_data = (pha_data / (2 * np.pi) + range_center) * range_norm
         pha_img = nb.Nifti1Image(pha_data, img.affine, img.header)
         pha_img.to_filename(out_dir / "phase_gfactor_normalized.nii.gz")
@@ -338,8 +375,8 @@ def run_nordic(
     # Calculate noise level from noise volumes
     if n_noise_vols > 0:
         # BUG: MATLAB version only uses the first noise volume
-        k_space_noise = k_space[..., -n_noise_vols:]
-        measured_noise = estimate_noise_level(k_space_noise, is_complex=has_complex)
+        noise_data = demod_complex_data[..., -n_noise_vols:]
+        measured_noise = estimate_noise_level(noise_data=noise_data, is_complex=has_complex)
     else:
         measured_noise = 1
 
@@ -347,12 +384,12 @@ def run_nordic(
         # Secondary step for filtered phase with residual spikes
         for i_slice in range(n_slices)[::-1]:
             for j_vol in range(n_vols):
-                k_space_slice = k_space[:, :, i_slice, j_vol]
+                slice_data = demod_complex_data[:, :, i_slice, j_vol]
                 filtered_phase_slice = filtered_phase[:, :, i_slice, j_vol]
-                phase_diff = np.angle(k_space_slice / filtered_phase_slice)
-                mask = (np.abs(phase_diff) > 1) * (np.abs(k_space_slice) > np.sqrt(2))
+                phase_diff = np.angle(slice_data / filtered_phase_slice)
+                mask = (np.abs(phase_diff) > 1) * (np.abs(slice_data) > np.sqrt(2))
                 temp_filtered_phase_slice = filtered_phase_slice.copy()
-                temp_filtered_phase_slice[mask] = k_space_slice[mask]
+                temp_filtered_phase_slice[mask] = slice_data[mask]
                 filtered_phase[:, :, i_slice, j_vol] = temp_filtered_phase_slice
 
     if debug:
@@ -375,25 +412,25 @@ def run_nordic(
         filtered_phase_real_img.to_filename(out_dir / "filtered_phase_real.nii.gz")
         del filtered_phase_real_img
 
-    k_space = k_space * np.exp(-1j * np.angle(filtered_phase))
-    k_space[np.isnan(k_space)] = 0
-    k_space[np.isinf(k_space)] = 0
+    demod_complex_data = demod_complex_data * np.exp(-1j * np.angle(filtered_phase))
+    demod_complex_data[np.isnan(demod_complex_data)] = 0
+    demod_complex_data[np.isinf(demod_complex_data)] = 0
 
     if data_has_zero_elements:
         # Fill in zero elements with random noise?
-        zero_mask = np.sum(np.abs(k_space), axis=3) == 0
+        zero_mask = np.sum(np.abs(demod_complex_data), axis=3) == 0
         num_zero_elements = np.sum(zero_mask)
         for i_vol in range(n_vols):
-            k_space_vol = k_space[:, :, :, i_vol]
-            k_space_vol[zero_mask] = (
+            volume_data = demod_complex_data[:, :, :, i_vol]
+            volume_data[zero_mask] = (
                 np.random.normal(size=num_zero_elements)
                 + 1j * np.random.normal(size=num_zero_elements)
             ) / np.sqrt(2)
-            k_space[:, :, :, i_vol] = k_space_vol
+            demod_complex_data[:, :, :, i_vol] = volume_data
 
     # Denoise the data with NORDIC or MP-PCA
     denoised_complex = denoise_data(
-        k_space=k_space,
+        data=demod_complex_data,
         kernel_size=kernel_size_pca,
         patch_overlap=patch_overlap_pca,
         out_dir=out_dir,
@@ -439,17 +476,22 @@ def run_nordic(
     print("Done!")
 
 
-def filter_phase(complex_data, phase_filter_width, temporal_phase):
+def filter_phase(data, phase_filter_width, temporal_phase):
     """Filter the phase data.
+
+    Based on Rob Smith's explanation in
+    https://github.com/MRtrix3/mrtrix3/issues/3031#issuecomment-2569523786,
+    this function is meant to calculate a low-pass filtered version of the phase data
+    in order to demodulate gross phase differences in the complex data.
 
     Parameters
     ----------
-    complex_data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
         The complex-valued data.
     phase_filter_width : int
         Specifies the width of the smoothing filter for the phase.
         Must be an int between 1 and 10.
-    temporal_phase : {1, 2, 3}
+    temporal_phase : {0, 1, 2, 3}
         Correction for slice and time-specific phase.
         Values > 0 will calculate a standard low-pass filtered phase map.
         Value == 2 will perform a secondary step for filtered phase with residual spikes.
@@ -463,13 +505,13 @@ def filter_phase(complex_data, phase_filter_width, temporal_phase):
     filtered_phase : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
         The filtered phase data.
     """
-    n_x, n_y, n_slices, n_vols = complex_data.shape
+    n_x, n_y, n_slices, n_vols = data.shape
 
     # Preallocate 4D array of zeros
     # XXX: WHAT IS filtered_phase?
     # XXX: filtered_phase results are very similar between MATLAB and Python at this point.
     # The difference image looks like white noise.
-    filtered_phase = np.zeros_like(complex_data)
+    filtered_phase = np.zeros_like(data)
 
     # If the temporal phase is 1 - 3, smooth the phase data
     # Except it's not just the phase data???
@@ -479,7 +521,7 @@ def filter_phase(complex_data, phase_filter_width, temporal_phase):
             # Loop over volumes forward, including the noise volumes(???)
             for j_vol in range(n_vols):
                 # Grab the 2D slice of the 4D array
-                slice_data = complex_data[:, :, i_slice, j_vol]
+                slice_data = data[:, :, i_slice, j_vol]
 
                 # Apply 1D FFT to the 2D slice
                 for k_dim in range(2):
@@ -519,7 +561,7 @@ def filter_phase(complex_data, phase_filter_width, temporal_phase):
     if temporal_phase == 2:
         for i_slice in range(n_slices)[::-1]:
             for j_vol in range(n_vols):
-                slice_data = complex_data[:, :, i_slice, j_vol]
+                slice_data = data[:, :, i_slice, j_vol]
                 filtered_phase_slice = filtered_phase[:, :, i_slice, j_vol]
                 phase_diff = np.angle(slice_data / filtered_phase_slice)
                 mask = np.abs(phase_diff) > 1
@@ -531,7 +573,7 @@ def filter_phase(complex_data, phase_filter_width, temporal_phase):
 
 
 def estimate_gfactor(
-    k_space,
+    data,
     kernel_size,
     patch_overlap,
     out_dir,
@@ -545,8 +587,8 @@ def estimate_gfactor(
 
     Parameters
     ----------
-    k_space : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
-        The complex-valued k-space(?) data.
+    data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+        The demodulated complex-valued data.
     kernel_size : len-3 list or None
         The size of the kernel to use for g-factor estimation.
         Default is None.
@@ -575,16 +617,16 @@ def estimate_gfactor(
     else:
         kernel_size = [int(i) for i in kernel_size[:3]]
 
-    n_x, _, _, n_vols = k_space.shape
+    n_x, _, _, n_vols = data.shape
     n_x_patches = n_x - kernel_size[0]
     patch_statuses = np.zeros(n_x_patches, dtype=int)
 
     # Preallocate 3D arrays of zeros
-    total_patch_weights = np.zeros(k_space.shape[:3], dtype=int)
-    gfactor = np.zeros_like(k_space[..., 0])
-    component_threshold = np.zeros(k_space.shape[:3], dtype=float)
-    energy_removed = np.zeros(k_space.shape[:3], dtype=float)
-    snr_weight = np.zeros(k_space.shape[:3], dtype=float)
+    total_patch_weights = np.zeros(data.shape[:3], dtype=int)
+    gfactor = np.zeros_like(data[..., 0])
+    component_threshold = np.zeros(data.shape[:3], dtype=float)
+    energy_removed = np.zeros(data.shape[:3], dtype=float)
+    snr_weight = np.zeros(data.shape[:3], dtype=float)
     # The original code re-creates KSP_processed here for no reason
 
     # patch_average is hardcoded as False so this block is always executed.
@@ -598,12 +640,12 @@ def estimate_gfactor(
 
     print("Estimating g-factor ...")
     # Preallocate 4D array of zeros
-    reconstructed_k_space = np.zeros_like(k_space)
+    denoised_data = np.zeros_like(data)
     # Loop over patches in the x-direction
     # Looping over y and z happens within the sub_llr_processing function
     for i_x_patch in range(n_x_patches):
         (
-            reconstructed_k_space,
+            denoised_data,
             _,
             total_patch_weights,
             gfactor,
@@ -611,8 +653,8 @@ def estimate_gfactor(
             energy_removed,
             snr_weight,
         ) = sub_llr_processing(
-            reconstructed_k_space=reconstructed_k_space,
-            k_space=k_space,
+            denoised_data=denoised_data,
+            data=data,
             patch_num=i_x_patch,
             patch_statuses=patch_statuses,
             total_patch_weights=total_patch_weights,
@@ -630,7 +672,7 @@ def estimate_gfactor(
             soft_thrs=10,
         )
 
-    reconstructed_k_space = reconstructed_k_space / total_patch_weights[..., None]
+    denoised_data = denoised_data / total_patch_weights[..., None]
     gfactor = np.sqrt(gfactor / total_patch_weights)
     component_threshold = component_threshold / total_patch_weights
     energy_removed = energy_removed / total_patch_weights
@@ -678,7 +720,7 @@ def estimate_gfactor(
 
 
 def denoise_data(
-    k_space,
+    data,
     kernel_size,
     patch_overlap,
     out_dir,
@@ -697,7 +739,7 @@ def denoise_data(
 
     Parameters
     ----------
-    k_space : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
         The complex-valued k-space(?) data.
     kernel_size : len-3 list or None
         The size of the kernel to use for PCA.
@@ -729,12 +771,12 @@ def denoise_data(
 
     Returns
     -------
-    reconstructed_k_space : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    denoised_data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
         The denoised complex-valued k-space data.
     """
-    n_x, _, n_slices, n_vols = k_space.shape
+    n_x, _, n_slices, n_vols = data.shape
 
-    reconstructed_k_space = np.zeros_like(k_space)
+    denoised_data = np.zeros_like(data)
     auto_kernel_size = np.ones(3, dtype=int) * int(np.round(np.cbrt(n_vols * 11)))
     if kernel_size is not None:
         if not np.array_equal(kernel_size, auto_kernel_size):
@@ -777,16 +819,14 @@ def denoise_data(
     # Scale NVR threshold by measured noise level and error factor
     nvr_threshold *= measured_noise * factor_error
     if has_complex:
-        # Scale NVR threshold for complex data
-        # Since measured_noise is scaled by sqrt(2) earlier and is only used for nvr_threshold,
-        # why not just keep it as-is?
+        # Scale NVR threshold for complex data, since the simulations used real data only
         nvr_threshold *= np.sqrt(2)
 
-    total_patch_weights = np.zeros(k_space.shape[:3], dtype=int)
-    noise = np.zeros_like(k_space[..., 0])  # complex
-    component_threshold = np.zeros(k_space.shape[:3], dtype=float)
-    energy_removed = np.zeros(k_space.shape[:3], dtype=float)
-    snr_weight = np.zeros(k_space.shape[:3], dtype=float)
+    total_patch_weights = np.zeros(data.shape[:3], dtype=int)
+    noise = np.zeros_like(data[..., 0])  # complex
+    component_threshold = np.zeros(data.shape[:3], dtype=float)
+    energy_removed = np.zeros(data.shape[:3], dtype=float)
+    snr_weight = np.zeros(data.shape[:3], dtype=float)
 
     n_x_patches = n_x - kernel_size[0]
     # Reset KSP_processed (now called patch_statuses) to zeros for next stage
@@ -803,7 +843,7 @@ def denoise_data(
     # Looping over y and z happens within the sub_llr_processing function
     for i_x_patch in range(n_x_patches):
         (
-            reconstructed_k_space,
+            denoised_data,
             _,
             total_patch_weights,
             noise,
@@ -811,8 +851,8 @@ def denoise_data(
             energy_removed,
             snr_weight,
         ) = sub_llr_processing(
-            reconstructed_k_space=reconstructed_k_space,
-            k_space=k_space,
+            denoised_data=denoised_data,
+            data=data,
             patch_num=i_x_patch,
             patch_statuses=patch_statuses,
             total_patch_weights=total_patch_weights,
@@ -833,7 +873,7 @@ def denoise_data(
     # Assumes that the combination is with N instead of sqrt(N). Works for NVR not MPPCA.
     # These arrays are summed over patches and need to be scaled by the patch scaling factor,
     # which is typically just the number of patches that contribute to each voxel.
-    reconstructed_k_space = reconstructed_k_space / total_patch_weights[..., None]
+    denoised_data = denoised_data / total_patch_weights[..., None]
     print("Completed NORDIC")
 
     if debug:
@@ -862,7 +902,7 @@ def denoise_data(
         out_img.to_filename(out_dir / "n_patch_runs.nii.gz")
         del total_patch_weights, out_img
 
-        residual = k_space - reconstructed_k_space
+        residual = data - denoised_data
 
         # Split residuals into magnitude and phase
         residual_magn = np.abs(residual)
@@ -876,12 +916,12 @@ def denoise_data(
             residual_phase_img.to_filename(out_dir / "residual_phase.nii.gz")
             del residual, residual_phase, residual_phase_img
 
-    return reconstructed_k_space
+    return denoised_data
 
 
 def sub_llr_processing(
-    reconstructed_k_space,
-    k_space,
+    denoised_data,
+    data,
     patch_num,
     total_patch_weights,
     patch_statuses,
@@ -902,12 +942,12 @@ def sub_llr_processing(
 
     Parameters
     ----------
-    reconstructed_k_space : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
-    k_space : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    denoised_data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
     patch_num : int
         Patch number. Each patch is processed separately.
     total_patch_weights : np.ndarray of shape (n_x, n_y, n_slices)
-        Used to scale the outputs, including reconstructed_k_space, noise, component_threshold,
+        Used to scale the outputs, including denoised_data, noise, component_threshold,
         and energy_removed.
     noise : np.ndarray of shape (n_x, n_y, n_slices)
     component_threshold : np.ndarray of shape (n_x, n_y, n_slices)
@@ -921,8 +961,8 @@ def sub_llr_processing(
 
     Returns
     -------
-    reconstructed_k_space : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
-    k_space : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    denoised_data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
+    data : np.ndarray of shape (n_x, n_y, n_slices, n_vols)
         Not modified in this function so could just be dropped as an output.
     total_patch_weights : np.ndarray of shape (n_x, n_y, n_slices)
     noise : np.ndarray of shape (n_x, n_y, n_slices)
@@ -932,7 +972,7 @@ def sub_llr_processing(
     """
     import pickle
 
-    _, n_y, _, _ = k_space.shape
+    _, n_y, _, _ = data.shape
     x_patch_idx = np.arange(0, kernel_size[0], dtype=int) + patch_num
 
     # not being processed also not completed yet
@@ -951,8 +991,8 @@ def sub_llr_processing(
                 # identified as bad file and being identified for reprocessing
                 patch_statuses[patch_num] = 0
                 return (
-                    reconstructed_k_space,
-                    k_space,
+                    denoised_data,
+                    data,
                     total_patch_weights,
                     noise,
                     component_threshold,
@@ -969,7 +1009,7 @@ def sub_llr_processing(
             patch_statuses[patch_num] = 1
             if DATA_full2 is None:
                 patch_statuses[patch_num] = 1  # STARTING
-                k_space_x_patch = k_space[x_patch_idx, :, :, :]
+                k_space_x_patch = data[x_patch_idx, :, :, :]
                 lambda_thresh = llr_scale * nvr_threshold
 
                 if patch_average:  # patch_average is always False
@@ -1020,16 +1060,16 @@ def sub_llr_processing(
                     snr_weight[x_patch_idx, :, :] = snr_weight_x_patch
 
         if patch_average:  # patch_average is always False
-            reconstructed_k_space[x_patch_idx, ...] += DATA_full2
+            denoised_data[x_patch_idx, ...] += DATA_full2
             raise NotImplementedError("This block is never executed.")
         else:
-            reconstructed_k_space[x_patch_idx, :n_y, ...] += DATA_full2
+            denoised_data[x_patch_idx, :n_y, ...] += DATA_full2
 
         patch_statuses[patch_num] = 3
 
     return (
-        reconstructed_k_space,
-        k_space,
+        denoised_data,
+        data,
         total_patch_weights,
         noise,
         component_threshold,
@@ -1055,7 +1095,7 @@ def subfunction_loop_for_nvr_avg(
     Parameters
     ----------
     k_space_x_patch : np.ndarray of shape (kernel_size_x, n_y, n_z, n_vols)
-        An x patch of k_space data. Y, Z, and T are full length.
+        An x patch of data data. Y, Z, and T are full length.
     """
     raise NotImplementedError("This block is never executed.")
     denoised_x_patch = np.zeros(k_space_x_patch.shape)
@@ -1158,12 +1198,12 @@ def subfunction_loop_for_nvr_avg_update(
     scale_patches=False,
     patch_average_sub=None,
 ):
-    """Loop over patches in the y and z directions to denoise a patch of k_space data.
+    """Loop over patches in the y and z directions to denoise a patch of data data.
 
     Parameters
     ----------
     k_space_x_patch : np.ndarray of shape (kernel_size_x, n_y, n_z, n_vols)
-        An x patch of k_space data. Y, Z, and T are full length.
+        An x patch of data data. Y, Z, and T are full length.
     kernel_size_z : int
         Size of the kernel in the z-direction.
     kernel_size_y : int
