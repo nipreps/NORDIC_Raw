@@ -485,7 +485,7 @@ for n=1:size(KSP2,4);
 end
 
 if ARG.noise_volume_last>0
-    KSP2_NOISE =KSP2(:,:,:,end+1-ARG.noise_volume_last);
+    KSP2_NOISE =KSP2(:,:,:,end+1-ARG.noise_volume_last:end);
 end
 
 
