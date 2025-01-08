@@ -456,7 +456,7 @@ if ( ARG.save_gfactor_map==2 )  | ( ARG.save_gfactor_map==1 )
         g_IMG= single(abs(g_IMG)*2^gain_level);
     end
 
-    niftiwrite((g_IMG),[ARG.DIROUT 'gfactor_' fn_out(1:end) '.nii'])
+    niftiwrite((g_IMG),[ARG.DIROUT 'gfactor_' fn_out(1:end) '.nii'], info)
     if ARG.save_gfactor_map==2
         return
     end
