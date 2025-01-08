@@ -936,7 +936,8 @@ for n2=[1: max(1,floor(w2/ARG.patch_average_sub)):size(KSP2a,2)*1-w2+1  size(KSP
         if isempty(soft_thrs)
             energy_scrub=sqrt(sum(S.^1)).\sqrt(sum(S(S<lambda2).^1));
             S(S<lambda2)=0;
-            t=idx;
+            % get index of first removed component
+            t=prod(size(S)) - idx;
         elseif soft_thrs~=10;
 
             S=S-lambda2*soft_thrs;
