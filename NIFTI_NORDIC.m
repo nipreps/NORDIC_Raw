@@ -51,6 +51,9 @@ function  NIFTI_NORDIC(fn_magn_in,fn_phase_in,fn_out,ARG)
 %
 %   ARG.save_gfactor_map   val = [1 2].  1, saves the RELATIVE gfactor, 2 saves the
 %                                            gfactor and does not complete the NORDIC processing
+%   ARG.write_gzipped_niftis  val = [0, 1]  Output files are written to
+%                                           disk ask compressed *.nii.gz NIfTIs.
+%                                           default is 0 (= false).
 
 
 %  TODO
@@ -154,6 +157,10 @@ if ~isfield(ARG,'data_has_zero_elements') %
     ARG.data_has_zero_elements=0; %  % If there are pixels that are constant zero
 end
 
+if ~isfield(ARG, 'write_gzipped_niftis')
+    ARG.write_gzipped_niftis = 0;
+end
+
 
 ARG;
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -167,55 +174,55 @@ if ARG.magnitude_only~=1
 
 
     if ARG.use_generic_NII_read~=1
-        mag_data=abs(single(niftiread(fn_magn_in)));
-        pha_data=single(niftiread(fn_phase_in));
+        I_M=abs(single(niftiread(fn_magn_in)));
+        I_P=single(niftiread(fn_phase_in));
     else
         try
             tmp=load_nii(fn_magn_in);
-            mag_data=abs(single(tmp.img));
+            I_M=abs(single(tmp.img));
             tmp=load_nii(fn_phase_in);
-            pha_data=single(tmp.img);
+            I_P=single(tmp.img);
         catch
             disp('Missing nfiti tool. Serach mathworks for load_nii  fileexchange 8797')
         end
 
     end
 
-    phase_range=single(max(pha_data(:)));
-    phase_range_min=single(min(pha_data(:)));
+    phase_range=single(max(I_P(:)));
+    phase_range_min=single(min(I_P(:)));
     if ~exist('info_phase')
-        info_phase.Datatype=class(pha_data);
-        info.Datatype=class(mag_data);
+        info_phase.Datatype=class(I_P);
+        info.Datatype=class(I_M);
     end
     % Here, we combine magnitude and phase data into complex form
     fprintf('Phase should be -pi to pi...\n')
 
     % convert to single and then scale the phase
-    pha_data = single(pha_data);
+    I_P = single(I_P);
     range_norm=phase_range-phase_range_min;
     range_center=(phase_range+phase_range_min)/range_norm*1/2;
-    pha_data = (single(pha_data)./range_norm -range_center)*2*pi;
-    complex_data=single(mag_data)  .* exp(1i*pha_data);
+    I_P = (single(I_P)./range_norm -range_center)*2*pi;
+    II=single(I_M)  .* exp(1i*I_P);
 
 
     if 0
         if strmatch(info_phase.Datatype,'uint16')
-            pha_data = single(pha_data)/phase_range*2*pi;
-            complex_data=single(mag_data)  .* exp(1i*pha_data);
+            I_P = single(I_P)/phase_range*2*pi;
+            II=single(I_M)  .* exp(1i*I_P);
         elseif strmatch(info_phase.Datatype,'int16')
-            pha_data = (single(pha_data)+1-(phase_range+1)/2)/(phase_range+1)*2*pi;
-            complex_data=single(mag_data)  .* exp(1i*pha_data);
+            I_P = (single(I_P)+1-(phase_range+1)/2)/(phase_range+1)*2*pi;
+            II=single(I_M)  .* exp(1i*I_P);
         elseif strmatch(info_phase.Datatype,'single')
-            phase_range_min=min(pha_data(:));
+            phase_range_min=min(I_P(:));
             range_norm=phase_range-phase_range_min;
             range_center=(phase_range+phase_range_min)/range_norm*1/2;
-            pha_data = (single(pha_data)./range_norm -range_center)*2*pi;
-            complex_data=single(mag_data)  .* exp(1i*pha_data);
+            I_P = (single(I_P)./range_norm -range_center)*2*pi;
+            II=single(I_M)  .* exp(1i*I_P);
 
         end
     end
 
-    fprintf('Phase data range is %.2f to %.2f\n', min(pha_data(:)), max(pha_data(:)))
+    fprintf('Phase data range is %.2f to %.2f\n', min(I_P(:)), max(I_P(:)))
 else
 
     try
@@ -224,15 +231,15 @@ else
 
 
     if ARG.use_generic_NII_read~=1
-        mag_data=abs(single(niftiread(fn_magn_in)));
+        I_M=abs(single(niftiread(fn_magn_in)));
     else
         tmp=load_nii(fn_magn_in);
-        mag_data=abs(single(tmp.img));
+        I_M=abs(single(tmp.img));
     end
 
 
     if ~exist('info_phase')
-        info.Datatype=class(mag_data);
+        info.Datatype=class(I_M);
     end
 
 end
@@ -241,29 +248,29 @@ end
 
 if ~isempty(ARG.magnitude_only)
     if ARG.magnitude_only==1
-        complex_data=single(mag_data);
+        II=single(I_M);
         ARG.temporal_phase=0;
     end
 end
 
 
 
-first_volume=abs(complex_data(:,:,:,1));
-ARG.ABSOLUTE_SCALE=min(first_volume(first_volume~=0));
-complex_data=complex_data./ARG.ABSOLUTE_SCALE;
+TEMPVOL=abs(II(:,:,:,1));
+ARG.ABSOLUTE_SCALE=min(TEMPVOL(TEMPVOL~=0));
+II=II./ARG.ABSOLUTE_SCALE;
 
 
 
 
 %   load test_DATA
-%  complex_data=complex_data(:,:,:,1:95);
+%  II=II(:,:,:,1:95);
 
-if size(complex_data,4)<6
+if size(II,4)<6
     disp('Too few volumes')
     % return
 end
 
-KSP2=complex_data;
+KSP2=II;
 matdim=size(KSP2);
 
 tt=mean(reshape(abs(KSP2),[],size(KSP2,4)));
@@ -303,14 +310,6 @@ if           ARG.temporal_phase>0; % Standarad low-pass filtered map
         end
     end
 end
-
-tmp = arr;
-ARG.phase_filter_width=3;
-for ndim=[1:2]; tmp=ifftshift(ifft(ifftshift( tmp ,ndim),[],ndim),ndim+0); end
-[nx, ny, nc, nb] = size(tmp(:,:,:,:,1,1));
-tmp = bsxfun(@times,tmp,reshape(tukeywin(ny,1).^ARG.phase_filter_width,[1 ny]));
-tmp = bsxfun(@times,tmp,reshape(tukeywin(nx,1).^ARG.phase_filter_width,[nx 1]));
-for ndim=[1:2]; tmp=fftshift(fft(fftshift( tmp ,ndim),[],ndim),ndim+0); end
 
 
 if           ARG.temporal_phase==2; % Secondary step for filtered phase with residual spikes
@@ -375,7 +374,7 @@ else
     ARG.kernel_size=[ARG.kernel_size_gfactor(1) ARG.kernel_size_gfactor(2) ARG.kernel_size_gfactor(3)];
 end
 
-QQ.patch_statuses=zeros(1,size(KSP2,1)-ARG.kernel_size(1));
+QQ.KSP_processed=zeros(1,size(KSP2,1)-ARG.kernel_size(1));
 ARG.patch_average=0;
 ARG.patch_average_sub= ARG.gfactor_patch_overlap;
 
@@ -388,21 +387,21 @@ NOISE=KSP_weight;
 Component_threshold=KSP_weight;
 energy_removed=KSP_weight;
 SNR_weight=KSP_weight;
-QQ.patch_statuses=zeros(1,size(KSP2,1)-ARG.kernel_size(1));
+QQ.KSP_processed=zeros(1,size(KSP2,1)-ARG.kernel_size(1));
 
 if ARG.patch_average==0
-    patch_statuses=QQ.patch_statuses*0;
+    KSP_processed=QQ.KSP_processed*0;
     for nw1=2:max(1,floor(ARG.kernel_size(1)/ARG.patch_average_sub));
-        patch_statuses(1,nw1 : max(1,floor(ARG.kernel_size(1)/ARG.patch_average_sub)):end)=2;
+        KSP_processed(1,nw1 : max(1,floor(ARG.kernel_size(1)/ARG.patch_average_sub)):end)=2;
     end
-    patch_statuses(end)=0; % disp
-    QQ.patch_statuses=patch_statuses;
+    KSP_processed(end)=0; % disp
+    QQ.KSP_processed=KSP_processed;
 end
-patch_statuses;
+KSP_processed;
 
 disp('estimating g-factor ...')
 QQ.ARG=ARG;
-for n1=1:size(QQ.patch_statuses,2)
+for n1=1:size(QQ.KSP_processed,2)
     % fprintf( [num2str(n1) ' '])
     [KSP_recon,~,KSP_weight,NOISE,Component_threshold,energy_removed,SNR_weight]=sub_LLR_Processing(KSP_recon,KSP2,ARG,n1,QQ,master_fast,KSP_weight,NOISE,Component_threshold,energy_removed,SNR_weight)   ;    % save all files
     % fprintf( [num2str(n1) ' '])
@@ -456,7 +455,8 @@ if ( ARG.save_gfactor_map==2 )  | ( ARG.save_gfactor_map==1 )
         g_IMG= single(abs(g_IMG)*2^gain_level);
     end
 
-    niftiwrite((g_IMG),[ARG.DIROUT 'gfactor_' fn_out(1:end) '.nii'], info)
+    niftiwrite((g_IMG),[ARG.DIROUT 'gfactor_' fn_out(1:end) '.nii'], ...
+        'Compressed', ARG.write_gzipped_niftis)
     if ARG.save_gfactor_map==2
         return
     end
@@ -470,7 +470,7 @@ end
 
 
 
-KSP2=complex_data;
+KSP2=II;
 matdim=size(KSP2);
 
 
@@ -485,7 +485,7 @@ for n=1:size(KSP2,4);
 end
 
 if ARG.noise_volume_last>0
-    KSP2_NOISE =KSP2(:,:,:,end+1-ARG.noise_volume_last:end);
+    KSP2_NOISE =KSP2(:,:,:,end+1-ARG.noise_volume_last);
 end
 
 
@@ -574,7 +574,7 @@ if matdim(3) <= ARG.kernel_size(3)  % Number of slices is less than cubic kernel
 end
 
 
-QQ.patch_statuses=zeros(1,size(KSP2,1)-ARG.kernel_size(1));
+QQ.KSP_processed=zeros(1,size(KSP2,1)-ARG.kernel_size(1));
 ARG.patch_average=0;
 ARG.patch_average_sub= ARG.NORDIC_patch_overlap ;
 % ARG.kernel_size=[7 7 7]; ARG.patch_average_sub=7;  MPPCA
@@ -619,20 +619,20 @@ NOISE=KSP_weight;
 Component_threshold=KSP_weight;
 energy_removed=KSP_weight;
 SNR_weight=KSP_weight;
-QQ.patch_statuses=zeros(1,size(KSP2,1)-ARG.kernel_size(1));
+QQ.KSP_processed=zeros(1,size(KSP2,1)-ARG.kernel_size(1));
 
 if ARG.patch_average==0
-    patch_statuses=QQ.patch_statuses*0;
+    KSP_processed=QQ.KSP_processed*0;
     for nw1=2:max(1,floor(ARG.kernel_size(1)/ARG.patch_average_sub));
-        patch_statuses(1,nw1 : max(1,floor(ARG.kernel_size(1)/ARG.patch_average_sub)):end)=2;
+        KSP_processed(1,nw1 : max(1,floor(ARG.kernel_size(1)/ARG.patch_average_sub)):end)=2;
     end
-    patch_statuses(end)=0; % disp
-    QQ.patch_statuses=patch_statuses;
+    KSP_processed(end)=0; % disp
+    QQ.KSP_processed=KSP_processed;
 end
 disp('starting NORDIC ...')
-patch_statuses;
+KSP_processed;
 QQ.ARG=ARG;
-for n1=1:size(QQ.patch_statuses,2)
+for n1=1:size(QQ.KSP_processed,2)
     [KSP_recon,~,KSP_weight,NOISE,Component_threshold,energy_removed,SNR_weight]=sub_LLR_Processing(KSP_recon,KSP2,ARG,n1,QQ,master_fast,KSP_weight,NOISE,Component_threshold,energy_removed,SNR_weight)   ;    % save all files
 end
 KSP_recon=KSP_recon./repmat((KSP_weight),[1 1 1 size(KSP2,4)]);  % Assumes that the combination is with N instead of sqrt(N). Works for NVR not MPPCA
@@ -692,7 +692,8 @@ if isfield(ARG,'make_complex_nii')
         IMG2_tmp= single(abs(IMG2_tmp)*2^gain_level);
     end
 
-    niftiwrite((IMG2_tmp),[ARG.DIROUT fn_out 'magn.nii'],info)
+    niftiwrite((IMG2_tmp),[ARG.DIROUT fn_out 'magn.nii'],info, ...
+        'Compressed', ARG.write_gzipped_niftis)
 
 
 
@@ -725,7 +726,8 @@ if isfield(ARG,'make_complex_nii')
     end
 
 
-    niftiwrite((IMG2_tmp),[ARG.DIROUT fn_out 'phase.nii'],info_phase)
+    niftiwrite((IMG2_tmp),[ARG.DIROUT fn_out 'phase.nii'],info_phase, ...
+        'Compressed', ARG.write_gzipped_niftis)
 
 else
     IMG2=abs(IMG2(:,:,:,1:end)); % remove g-factor and noise for DUAL 1
@@ -743,7 +745,8 @@ else
         IMG2= single(abs(IMG2)*2^gain_level);
     end
     if ARG.use_generic_NII_read==0;
-        niftiwrite((IMG2),[ARG.DIROUT fn_out(1:end) '.nii'],info)
+        niftiwrite((IMG2),[ARG.DIROUT fn_out(1:end) '.nii'],info, ...
+            'Compressed', ARG.write_gzipped_niftis)
     else
         nii=make_nii(IMG2);
         save_nii(nii, fullfile(ARG.DIROUT, [fn_out(1:end) '.nii']))
@@ -770,7 +773,7 @@ if ~exist('Component_threshold');Component_threshold=[];  end
 if ~exist('energy_removed');  energy_removed=[]; end
 if ~exist('SNR_weight'); SNR_weight=[]; end
 
-%  QQ.patch_statuses  0 nothing done, 1 running, 2 saved 3 completed and  averaged
+%  QQ.KSP_processed  0 nothing done, 1 running, 2 saved 3 completed and  averaged
 
 if master==0 && ARG.patch_average==0
     OPTION='NO_master_NO_PA';
@@ -799,28 +802,28 @@ switch OPTION
 end
 
 
-if     QQ.patch_statuses(1,n1)~=1  && QQ.patch_statuses(1,n1)~=3 % not being processed also not completed yet
+if     QQ.KSP_processed(1,n1)~=1  && QQ.KSP_processed(1,n1)~=3 % not being processed also not completed yet
 
-    if     QQ.patch_statuses(1,n1)==2 && master==1%  processed but not added.
+    if     QQ.KSP_processed(1,n1)==2 && master==1%  processed but not added.
         % loading instead of processing
         % load file as soon as save, if more than 10 sec, just do the recon
         % instead.
         try  % try to load otherwise go to next slice
             load([ARG.filename  'slice' num2str(n1)  '.mat'],'DATA_full2')
         catch;
-            QQ.patch_statuses(1,n1)=0;  % identified as bad file and being identified for reprocessing
+            QQ.KSP_processed(1,n1)=0;  % identified as bad file and being identified for reprocessing
             return  ;end
     end
 
-    if QQ.patch_statuses(1,n1)~=2
-        QQ.patch_statuses(1,n1)=1; % block for other processes
+    if QQ.KSP_processed(1,n1)~=2
+        QQ.KSP_processed(1,n1)=1; % block for other processes
         if ~exist('DATA_full2')
             ARG2=QQ.ARG;
             if master==0
-                QQ.patch_statuses(1,n1)=1    ;  % STARTING
+                QQ.KSP_processed(1,n1)=1    ;  % STARTING
                 KSP2a=QQ.KSP2([1:ARG.kernel_size(1)]+(n1-1),:,:,:); lambda=ARG2.LLR_scale*ARG.NVR_threshold;
             else
-                QQ.patch_statuses(1,n1)=1    ;  % STARTING
+                QQ.KSP_processed(1,n1)=1    ;  % STARTING
                 KSP2a=KSP2([1:ARG.kernel_size(1)]+(n1-1),:,:,:); lambda=ARG2.LLR_scale*ARG.NVR_threshold;
 
             end
@@ -856,9 +859,9 @@ if     QQ.patch_statuses(1,n1)~=1  && QQ.patch_statuses(1,n1)~=3 % not being pro
 
 
     if master==0
-        if QQ.patch_statuses(1,n1)~=2
+        if QQ.KSP_processed(1,n1)~=2
             save([ARG.filename  'slice' num2str(n1)  '.mat'],'DATA_full2', '-v7.3'        )
-            QQ.patch_statuses(1,n1)=2    ;  % COMPLETED
+            QQ.KSP_processed(1,n1)=2    ;  % COMPLETED
         end
     else
 
@@ -868,7 +871,7 @@ if     QQ.patch_statuses(1,n1)~=1  && QQ.patch_statuses(1,n1)~=3 % not being pro
         else
             KSP_recon([1:ARG.kernel_size(1)]+(n1-1) ,1:size(DATA_full2,2),:,:)=  KSP_recon([1:ARG.kernel_size(1)]+(n1-1) ,1:size(DATA_full2,2),:,:) +  DATA_full2;
         end
-        QQ.patch_statuses(1,n1)=3     ;
+        QQ.KSP_processed(1,n1)=3     ;
     end
 
 
@@ -876,6 +879,104 @@ end
 
 
 return
+
+
+
+
+function [KSP2_tmp_update, KSP2_weight]=subfunction_loop_for_NVR_avg(KSP2a,w3,w2,w1,lambda2,patch_avg, soft_thrs,KSP2_weight,ARG)
+if ~exist('patch_avg'); patch_avg=1;end
+if ~exist('soft_thrs'); soft_thrs=[]; end
+
+if ~exist('KSP2_weight')
+    KSP2_weight=zeros(size(KSP2a(:,:,:,1)));
+elseif isempty(KSP2_weight)
+    KSP2_weight=zeros(size(KSP2a(:,:,:,1)));
+end
+
+
+if ~exist('KSP2_tmp_update')
+    KSP2_tmp_update=zeros(size(KSP2a(:,:,:,:)));
+elseif isempty(KSP2_tmp_update)
+    KSP2_tmp_update=zeros(size(KSP2a(:,:,:,:)));
+end
+
+
+%   KSP2_weight=zeros(size(KSP2a(:,:,:,1)));
+%   KSP2_tmp_update=zeros(size(KSP2a));
+
+%   for n2=1:size(KSP2a,2)-w2+1;
+%        for n3=1:size(KSP2a,3)-w3+1;
+for n2=[1: max(1,floor(w2/ARG.patch_average_sub)):size(KSP2a,2)*1-w2+1  size(KSP2a,2)-w2+1];
+    for n3=[1: max(1,floor(w3/ARG.patch_average_sub)):size(KSP2a,3)*1-w3+1  size(KSP2a,3)-w3+1  ];
+
+        KSP2_tmp=KSP2a(:,[1:w2]+(n2-1),[1:w3]+(n3-1),:);
+        tmp1=reshape(KSP2_tmp,[],size(KSP2_tmp,4));
+
+        [U,S,V]=svd([(tmp1) ],'econ');
+        S=diag(S);
+
+
+
+
+        [idx]=sum(S<lambda2);
+        if isempty(soft_thrs)
+            S(S<lambda2)=0;
+        elseif soft_thrs==10  % USING MPPCA
+
+
+            %  disp('test for zero entries')
+            Test_mat=sum(tmp1,2);
+            sum(Test_mat==0)
+
+            centering=0;
+            MM=size(tmp1,1);
+            NNN=size(tmp1,2);
+            R = min(MM, NNN);
+            scaling = (max(MM, NNN) - (0:R-centering-1)) / NNN;
+            scaling = scaling(:);
+            vals=S;
+            vals = (vals).^2 / NNN;
+            % First estimation of Sigma^2;  Eq 1 from ISMRM presentation
+            csum = cumsum(vals(R-centering:-1:1)); cmean = csum(R-centering:-1:1)./(R-centering:-1:1)'; sigmasq_1 = cmean./scaling;
+            % Second estimation of Sigma^2; Eq 2 from ISMRM presentation
+            gamma = (MM - (0:R-centering-1)) / NNN;
+            rangeMP = 4*sqrt(gamma(:));
+            rangeData = vals(1:R-centering) - vals(R-centering);
+            sigmasq_2 = rangeData./rangeMP;
+            t = find(sigmasq_2 < sigmasq_1, 1);
+            S(t:end)=0;
+
+
+        else
+            S(max(1,end-floor(idx*soft_thrs)):end)=0;
+        end
+
+        tmp1=U*diag(S)*V';
+
+        tmp1=reshape(tmp1,size(KSP2_tmp));
+        if patch_avg==1
+
+            KSP2_tmp_update(:,[1:w2]+(n2-1),[1:w3]+(n3-1),:) =...
+                KSP2_tmp_update(:,[1:w2]+(n2-1),[1:w3]+(n3-1),:) +tmp1;
+            KSP2_weight(:,[1:w2]+(n2-1),[1:w3]+(n3-1),:) =...
+                KSP2_weight(:,[1:w2]+(n2-1),[1:w3]+(n3-1),:) +1;
+        else
+            KSP2_tmp_update(:,round(w2/2)+(n2-1),round(w3/2)+(n3-1),:) =...
+                KSP2_tmp_update(:,round(w2/2)+(n2-1),round(w3/2)+(n3-1),:) +tmp1(1,round(end/2),round(end/2),:);
+            KSP2_weight(:,round(w2/2)+(n2-1),round(w3/2)+(n3-1),:) =...
+                KSP2_weight(:,round(w2/2)+(n2-1),round(w3/2)+(n3-1),:) +1;
+
+        end
+
+
+    end
+end
+
+
+
+return
+
+
 
 
 function [KSP2_tmp_update, KSP2_weight,NOISE,KSP2_tmp_update_threshold,energy_removed,SNR_weight]=subfunction_loop_for_NVR_avg_update(KSP2a,w3,w2,w1,lambda2,patch_avg, soft_thrs,KSP2_weight,ARG,NOISE,KSP2_tmp_update_threshold,energy_removed,SNR_weight)
@@ -936,8 +1037,7 @@ for n2=[1: max(1,floor(w2/ARG.patch_average_sub)):size(KSP2a,2)*1-w2+1  size(KSP
         if isempty(soft_thrs)
             energy_scrub=sqrt(sum(S.^1)).\sqrt(sum(S(S<lambda2).^1));
             S(S<lambda2)=0;
-            % get index of first removed component
-            t=prod(size(S)) - idx;
+            t=idx;
         elseif soft_thrs~=10;
 
             S=S-lambda2*soft_thrs;
@@ -1043,4 +1143,3 @@ end
 
 
 return
-
