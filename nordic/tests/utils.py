@@ -37,10 +37,10 @@ def download_test_data(dset, data_dir=None):
     else:
         print(f'Downloading {dset} to {out_dir}')
 
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(data_dir, exist_ok=True)
     with requests.get(URLS[dset], stream=True, timeout=10) as req:
         with tarfile.open(fileobj=GzipFile(fileobj=BytesIO(req.content))) as t:
-            t.extractall(out_dir)  # noqa: S202
+            t.extractall(data_dir)  # noqa: S202
 
     return out_dir
 

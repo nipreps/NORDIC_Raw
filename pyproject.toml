@@ -126,6 +126,8 @@ omit = [
     "*/__init__.py",
     "*/conftest.py",
     "nordic/_version.py",
+    "matlab/*",
+    "notebooks/*",
 ]
 
 [tool.coverage.report]
