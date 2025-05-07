@@ -197,7 +197,8 @@ def run_nordic(
     -   In MATLAB, min(complex) and max(complex) use the magnitude of the complex number.
     -   In Python, min(complex) and max(complex) use the whole complex number,
         so you need to do np.abs(complex) before np.min/np.max.
-    -   In MATLAB, niftiread changes the data (on UPenn's cluster at least).
+    -   In MATLAB, niftiread ignores the slope and intercept of the NIfTI header,
+        which means that the data that is loaded is not correctly scaled.
         I ended up making a mat file containing the data loaded by MATLAB and
         converting it to a NIfTI image using Python for testing.
     -   KSP2 --> demod_complex_data
@@ -841,6 +842,7 @@ def denoise_data(
     print("Starting NORDIC ...")
     # Loop over patches in the x-direction
     # Looping over y and z happens within the sub_llr_processing function
+    # XXX: Could this be parallelized? The arrays are modified in place, so perhaps not.
     for i_x_patch in range(n_x_patches):
         (
             denoised_data,
@@ -1096,6 +1098,32 @@ def subfunction_loop_for_nvr_avg(
     ----------
     k_space_x_patch : np.ndarray of shape (kernel_size_x, n_y, n_z, n_vols)
         An x patch of data data. Y, Z, and T are full length.
+    kernel_size_z : int
+        Size of the kernel in the z-direction.
+    kernel_size_y : int
+        Size of the kernel in the y-direction.
+    lambda_thresh : float
+        NORDIC threshold for singular values.
+        This is used for NORDIC (soft_thrs=None), but not g-factor estimation (soft_thrs=10).
+    patch_avg : bool
+        Hardcoded as True. Seems unrelated to patch_average.
+    soft_thrs : float
+        Threshold for soft thresholding.
+        None for NORDIC, 10 for g-factor estimation. Other values are supported, but unused.
+    total_patch_weights : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        Weighting array for each voxel in the patch. Used to scale the output.
+        Since patch_scale is always set to 1, this is effectively the number of patches
+        that contribute to each voxel.
+    patch_average_sub : int
+        Subsampling factor for patch averaging.
+        Typically 2 for both NORDIC and g-factor estimation.
+
+    Returns
+    -------
+    denoised_x_patch : np.ndarray of shape (kernel_size_x, n_y, n_z, n_vols)
+        Denoised patch.
+    total_patch_weights : np.ndarray of shape (kernel_size_x, n_y, n_z)
+        Updated weighting array.
     """
     raise NotImplementedError("This block is never executed.")
     denoised_x_patch = np.zeros(k_space_x_patch.shape)
@@ -1198,12 +1226,12 @@ def subfunction_loop_for_nvr_avg_update(
     scale_patches=False,
     patch_average_sub=None,
 ):
-    """Loop over patches in the y and z directions to denoise a patch of data data.
+    """Loop over patches in the y and z directions to denoise a patch of data.
 
     Parameters
     ----------
     k_space_x_patch : np.ndarray of shape (kernel_size_x, n_y, n_z, n_vols)
-        An x patch of data data. Y, Z, and T are full length.
+        An x patch of data. Y, Z, and T are full length.
     kernel_size_z : int
         Size of the kernel in the z-direction.
     kernel_size_y : int
