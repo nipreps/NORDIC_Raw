@@ -1,5 +1,4 @@
 """Tests for the denoise module."""
-from pathlib import Path
 
 import pytest
 
@@ -44,26 +43,32 @@ def test_run_nordic_smoke(
     patch_average,
     llr_scale,
     tmp_path,
+    test_dataset,
 ):
     """Test the run_nordic function.
 
     This test parameterizes the input arguments to run_nordic, runs the function,
     and checks that the expected files are generated.
     """
-    data_path = Path(__file__).parent / 'data'
-
     # Load test data
-    mag_file = data_path / 'mag.nii.gz'
+    mag_file = test_dataset / 'sub-24053_ses-1_task-bao_dir-AP_run-01_echo-1_part-mag_bold.nii.gz'
     pha_file = None
     if use_phase:
-        pha_file = data_path / 'pha.nii.gz'
+        pha_file = (
+            test_dataset / 'sub-24053_ses-1_task-bao_dir-AP_run-01_echo-1_part-phase_bold.nii.gz'
+        )
 
     pha_norf_file = None
     mag_norf_file = None
     if use_norf:
-        mag_norf_file = data_path / 'mag_norf.nii.gz'
+        mag_norf_file = (
+            test_dataset / 'sub-24053_ses-1_task-bao_dir-AP_run-01_echo-1_part-mag_noRF.nii.gz'
+        )
         if use_phase:
-            pha_norf_file = data_path / 'pha_norf.nii.gz'
+            pha_norf_file = (
+                test_dataset
+                / 'sub-24053_ses-1_task-bao_dir-AP_run-01_echo-1_part-phase_noRF.nii.gz'
+            )
 
     # Run NORDIC
     denoise.run_nordic(

@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """Apply NORDIC to individual files."""
 
 import os

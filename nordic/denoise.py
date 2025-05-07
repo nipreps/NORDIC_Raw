@@ -36,11 +36,11 @@ def run_nordic(
     pha_file=None,
     mag_norf_file=None,
     pha_norf_file=None,
-    out_dir=".",
+    out_dir='.',
     factor_error=1,
     full_dynamic_range=False,
     temporal_phase=1,
-    algorithm="nordic",
+    algorithm='nordic',
     patch_overlap_gfactor=2,
     kernel_size_gfactor=None,
     patch_overlap_pca=2,
@@ -48,7 +48,7 @@ def run_nordic(
     phase_slice_average_for_kspace_centering=False,
     phase_filter_width=3,
     save_gfactor_map=True,
-    soft_thrs="auto",
+    soft_thrs='auto',
     debug=False,
     scale_patches=False,
     patch_average=False,
@@ -215,7 +215,7 @@ def run_nordic(
     -   DD_phase --> filtered_phase
     -   Noise map for NORDIC is all zeros
     """
-    assert algorithm in ("nordic", "mppca", "gfactor+mppca")
+    assert algorithm in ('nordic', 'mppca', 'gfactor+mppca')
     assert temporal_phase in (0, 1, 2, 3)
     assert phase_filter_width in range(1, 11)
 
@@ -230,7 +230,7 @@ def run_nordic(
         pha_img = nb.load(pha_file)
         pha_data = pha_img.get_fdata()
         if mag_data.shape != pha_data.shape:
-            raise ValueError("Magnitude and phase data must have the same shape")
+            raise ValueError('Magnitude and phase data must have the same shape')
 
     n_noise_vols = 0
     if mag_norf_file:
@@ -244,13 +244,11 @@ def run_nordic(
             pha_norf_data = pha_norf_img.get_fdata()
             pha_data = np.concatenate((pha_data, pha_norf_data), axis=3)
             if mag_norf_data.shape != pha_norf_data.shape:
-                raise ValueError(
-                    "Magnitude and phase noRF data must have the same shape"
-                )
+                raise ValueError('Magnitude and phase noRF data must have the same shape')
         elif has_complex:
             raise ValueError(
-                "If mag+phase data are provided and a mag noRF file is provided, "
-                "phase noRF file is required."
+                'If mag+phase data are provided and a mag noRF file is provided, '
+                'phase noRF file is required.'
             )
 
     # Take the absolute value of the magnitude data and cast to single
@@ -264,7 +262,7 @@ def run_nordic(
         range_center = (phase_range + phase_range_min) / range_norm * 1 / 2
         pha_data = (pha_data / range_norm - range_center) * 2 * np.pi
         pha_data = pha_data.astype(np.float32)  # cast to single
-        print("Phase range: ", np.min(pha_data), np.max(pha_data))
+        print('Phase range: ', np.min(pha_data), np.max(pha_data))
 
         # Combine magnitude and phase into complex-valued data
         complex_data = mag_data * np.exp(1j * pha_data)
@@ -282,9 +280,9 @@ def run_nordic(
     complex_data = complex_data / absolute_scale
 
     if complex_data.shape[3] < 6:
-        raise ValueError("Two few volumes in the input data")
+        raise ValueError('Two few volumes in the input data')
 
-    print("Estimating slice-dependent phases ...")
+    print('Estimating slice-dependent phases ...')
 
     if phase_slice_average_for_kspace_centering:
         # Create mean 3D array from all non-noise volumes of shape (X, Y, Z)
@@ -309,29 +307,31 @@ def run_nordic(
     demod_complex_data[np.isnan(demod_complex_data)] = 0
     demod_complex_data[np.isinf(demod_complex_data)] = 0
 
-    print("Completed estimating slice-dependent phases")
+    print('Completed estimating slice-dependent phases')
 
     # Write out corrected magnitude and phase images
     if has_complex and debug:
         mag_data = np.abs(demod_complex_data * absolute_scale)
         mag_img = nb.Nifti1Image(mag_data, img.affine, img.header)
-        mag_img.to_filename(out_dir / "magn_pregfactor_normalized.nii.gz")
+        mag_img.to_filename(out_dir / 'magn_pregfactor_normalized.nii.gz')
 
         pha_data = np.angle(demod_complex_data * absolute_scale)
         pha_data = (pha_data / (2 * np.pi) + range_center) * range_norm
         pha_img = nb.Nifti1Image(pha_data, img.affine, img.header)
-        pha_img.to_filename(out_dir / "phase_pregfactor_normalized.nii.gz")
+        pha_img.to_filename(out_dir / 'phase_pregfactor_normalized.nii.gz')
         del mag_data, pha_data
 
     # Estimate the g-factor map
-    if algorithm in ("nordic", "gfactor+mppca"):
+    if algorithm in ('nordic', 'gfactor+mppca'):
         # Reduce the number of volumes to 90 or fewer for g-factor estimation
         if kernel_size_gfactor is None:
             # Select first 90 (or fewer, if run is shorter) volumes from 4D array
             demod_complex_data = demod_complex_data[:, :, :, : min(90, n_vols + 1)]
         else:
             # Select first N volumes from 4D array, based on kernel_size_gfactor(4)
-            demod_complex_data = demod_complex_data[:, :, :, : min(kernel_size_gfactor[3], n_vols + 1)]
+            demod_complex_data = demod_complex_data[
+                :, :, :, : min(kernel_size_gfactor[3], n_vols + 1)
+            ]
 
         gfactor = estimate_gfactor(
             data=demod_complex_data,
@@ -365,12 +365,12 @@ def run_nordic(
     if has_complex and debug:
         mag_data = np.abs(demod_complex_data * absolute_scale)
         mag_img = nb.Nifti1Image(mag_data, img.affine, img.header)
-        mag_img.to_filename(out_dir / "magn_gfactor_normalized.nii.gz")
+        mag_img.to_filename(out_dir / 'magn_gfactor_normalized.nii.gz')
 
         pha_data = np.angle(demod_complex_data * absolute_scale)
         pha_data = (pha_data / (2 * np.pi) + range_center) * range_norm
         pha_img = nb.Nifti1Image(pha_data, img.affine, img.header)
-        pha_img.to_filename(out_dir / "phase_gfactor_normalized.nii.gz")
+        pha_img.to_filename(out_dir / 'phase_gfactor_normalized.nii.gz')
         del mag_data, pha_data
 
     # Calculate noise level from noise volumes
@@ -394,23 +394,17 @@ def run_nordic(
                 filtered_phase[:, :, i_slice, j_vol] = temp_filtered_phase_slice
 
     if debug:
-        filtered_phase_magn_img = nb.Nifti1Image(
-            np.abs(filtered_phase), img.affine, img.header
-        )
-        filtered_phase_magn_img.to_filename(out_dir / "filtered_phase_magn.nii.gz")
+        filtered_phase_magn_img = nb.Nifti1Image(np.abs(filtered_phase), img.affine, img.header)
+        filtered_phase_magn_img.to_filename(out_dir / 'filtered_phase_magn.nii.gz')
         del filtered_phase_magn_img
 
-        filtered_phase_phase_img = nb.Nifti1Image(
-            np.angle(filtered_phase), img.affine, img.header
-        )
-        filtered_phase_phase_img.to_filename(out_dir / "filtered_phase_phase.nii.gz")
+        filtered_phase_phase_img = nb.Nifti1Image(np.angle(filtered_phase), img.affine, img.header)
+        filtered_phase_phase_img.to_filename(out_dir / 'filtered_phase_phase.nii.gz')
         del filtered_phase_phase_img
 
         # Same as DD_phase written out by MATLAB version
-        filtered_phase_real_img = nb.Nifti1Image(
-            filtered_phase.real, img.affine, img.header
-        )
-        filtered_phase_real_img.to_filename(out_dir / "filtered_phase_real.nii.gz")
+        filtered_phase_real_img = nb.Nifti1Image(filtered_phase.real, img.affine, img.header)
+        filtered_phase_real_img.to_filename(out_dir / 'filtered_phase_real.nii.gz')
         del filtered_phase_real_img
 
     demod_complex_data = demod_complex_data * np.exp(-1j * np.angle(filtered_phase))
@@ -464,7 +458,7 @@ def run_nordic(
         denoised_magn = denoised_magn[..., :-n_noise_vols]
 
     denoised_magn = nb.Nifti1Image(denoised_magn, img.affine, img.header)
-    denoised_magn.to_filename(out_dir / "magn.nii.gz")
+    denoised_magn.to_filename(out_dir / 'magn.nii.gz')
 
     if has_complex:
         denoised_phase = np.angle(denoised_complex)
@@ -472,9 +466,9 @@ def run_nordic(
         if n_noise_vols > 0:
             denoised_phase = denoised_phase[..., :-n_noise_vols]
         denoised_phase = nb.Nifti1Image(denoised_phase, img.affine, img.header)
-        denoised_phase.to_filename(out_dir / "phase.nii.gz")
+        denoised_phase.to_filename(out_dir / 'phase.nii.gz')
 
-    print("Done!")
+    print('Done!')
 
 
 def filter_phase(data, phase_filter_width, temporal_phase):
@@ -639,7 +633,7 @@ def estimate_gfactor(
             patch_statuses[nw1::val] = 2
         patch_statuses[-1] = 0
 
-    print("Estimating g-factor ...")
+    print('Estimating g-factor ...')
     # Preallocate 4D array of zeros
     denoised_data = np.zeros_like(data)
     # Loop over patches in the x-direction
@@ -665,7 +659,7 @@ def estimate_gfactor(
             snr_weight=snr_weight,
             patch_average_sub=patch_overlap,
             llr_scale=0,
-            filename=str(out_dir / "out"),
+            filename=str(out_dir / 'out'),
             kernel_size=kernel_size,
             nvr_threshold=1,
             patch_average=patch_average,
@@ -681,22 +675,22 @@ def estimate_gfactor(
 
     if debug:
         out_img = nb.Nifti1Image(component_threshold, img.affine, img.header)
-        out_img.to_filename(out_dir / "gfactor_n_components_dropped.nii.gz")
+        out_img.to_filename(out_dir / 'gfactor_n_components_dropped.nii.gz')
         del component_threshold, out_img
 
         out_img = nb.Nifti1Image(energy_removed, img.affine, img.header)
-        out_img.to_filename(out_dir / "gfactor_energy_removed.nii.gz")
+        out_img.to_filename(out_dir / 'gfactor_energy_removed.nii.gz')
         del energy_removed, out_img
 
         out_img = nb.Nifti1Image(snr_weight, img.affine, img.header)
-        out_img.to_filename(out_dir / "gfactor_SNR_weight.nii.gz")
+        out_img.to_filename(out_dir / 'gfactor_SNR_weight.nii.gz')
         del snr_weight, out_img
 
         out_img = nb.Nifti1Image(total_patch_weights, img.affine, img.header)
-        out_img.to_filename(out_dir / "gfactor_n_patch_runs.nii.gz")
+        out_img.to_filename(out_dir / 'gfactor_n_patch_runs.nii.gz')
         del total_patch_weights, out_img
 
-    print("Completed estimating g-factor")
+    print('Completed estimating g-factor')
 
     if n_vols < 6:
         gfactor[np.isnan(gfactor)] = 0
@@ -715,7 +709,7 @@ def estimate_gfactor(
             gfactor_magn = gfactor_magn * (2**gain_level)
 
         gfactor_img = nb.Nifti1Image(gfactor_magn, img.affine, img.header)
-        gfactor_img.to_filename(out_dir / "gfactor.nii.gz")
+        gfactor_img.to_filename(out_dir / 'gfactor.nii.gz')
 
     return gfactor
 
@@ -781,27 +775,22 @@ def denoise_data(
     auto_kernel_size = np.ones(3, dtype=int) * int(np.round(np.cbrt(n_vols * 11)))
     if kernel_size is not None:
         if not np.array_equal(kernel_size, auto_kernel_size):
-            print(
-                f"Changing kernel size from {auto_kernel_size} to "
-                f"{kernel_size} for PCA"
-            )
+            print(f'Changing kernel size from {auto_kernel_size} to {kernel_size} for PCA')
         kernel_size = [int(i) for i in kernel_size]
     else:
         kernel_size = auto_kernel_size
 
     if n_slices <= kernel_size[2]:  # Number of slices is less than cubic kernel
         old_kernel_size = kernel_size[:]
-        kernel_size = np.ones(3, dtype=int) * int(
-            np.round(np.sqrt(n_vols * 11 / n_slices))
-        )
+        kernel_size = np.ones(3, dtype=int) * int(np.round(np.sqrt(n_vols * 11 / n_slices)))
         kernel_size[2] = n_slices
         print(
-            f"Number of slices is less than cubic kernel. "
-            f"Changing kernel size from {old_kernel_size} to {kernel_size} for PCA"
+            f'Number of slices is less than cubic kernel. '
+            f'Changing kernel size from {old_kernel_size} to {kernel_size} for PCA'
         )
 
-    if soft_thrs == "auto":
-        if "mppca" in algorithm:
+    if soft_thrs == 'auto':
+        if 'mppca' in algorithm:
             # mppca or gfactor+mppca
             soft_thrs = 10
         else:
@@ -839,7 +828,7 @@ def denoise_data(
             patch_statuses[nw1::val] = 2
         patch_statuses[-1] = 0
 
-    print("Starting NORDIC ...")
+    print('Starting NORDIC ...')
     # Loop over patches in the x-direction
     # Looping over y and z happens within the sub_llr_processing function
     # XXX: Could this be parallelized? The arrays are modified in place, so perhaps not.
@@ -864,7 +853,7 @@ def denoise_data(
             snr_weight=snr_weight,
             patch_average_sub=patch_overlap,
             llr_scale=llr_scale,
-            filename=str(out_dir / "out"),
+            filename=str(out_dir / 'out'),
             kernel_size=kernel_size,
             nvr_threshold=nvr_threshold,
             patch_average=patch_average,
@@ -876,32 +865,32 @@ def denoise_data(
     # These arrays are summed over patches and need to be scaled by the patch scaling factor,
     # which is typically just the number of patches that contribute to each voxel.
     denoised_data = denoised_data / total_patch_weights[..., None]
-    print("Completed NORDIC")
+    print('Completed NORDIC')
 
     if debug:
         noise_magn = np.abs(np.sqrt(noise / total_patch_weights))
         out_img = nb.Nifti1Image(noise_magn, img.affine, img.header)
-        out_img.to_filename(out_dir / "noise.nii.gz")
+        out_img.to_filename(out_dir / 'noise.nii.gz')
         del noise, noise_magn, out_img
 
         energy_removed = energy_removed / total_patch_weights
         out_img = nb.Nifti1Image(energy_removed, img.affine, img.header)
-        out_img.to_filename(out_dir / "energy_removed.nii.gz")
+        out_img.to_filename(out_dir / 'energy_removed.nii.gz')
         del energy_removed, out_img
 
         snr_weight = snr_weight / total_patch_weights
         out_img = nb.Nifti1Image(snr_weight, img.affine, img.header)
-        out_img.to_filename(out_dir / "snr_weight.nii.gz")
+        out_img.to_filename(out_dir / 'snr_weight.nii.gz')
         del snr_weight, out_img
 
         # Write out number of components removed
         component_threshold = component_threshold / total_patch_weights
         out_img = nb.Nifti1Image(component_threshold, img.affine, img.header)
-        out_img.to_filename(out_dir / "n_components_removed.nii.gz")
+        out_img.to_filename(out_dir / 'n_components_removed.nii.gz')
         del component_threshold, out_img
 
         out_img = nb.Nifti1Image(total_patch_weights, img.affine, img.header)
-        out_img.to_filename(out_dir / "n_patch_runs.nii.gz")
+        out_img.to_filename(out_dir / 'n_patch_runs.nii.gz')
         del total_patch_weights, out_img
 
         residual = data - denoised_data
@@ -909,13 +898,13 @@ def denoise_data(
         # Split residuals into magnitude and phase
         residual_magn = np.abs(residual)
         residual_magn_img = nb.Nifti1Image(residual_magn, img.affine, img.header)
-        residual_magn_img.to_filename(out_dir / "residual_magn.nii.gz")
+        residual_magn_img.to_filename(out_dir / 'residual_magn.nii.gz')
         del residual_magn, residual_magn_img
 
         if has_complex:
             residual_phase = np.angle(residual)
             residual_phase_img = nb.Nifti1Image(residual_phase, img.affine, img.header)
-            residual_phase_img.to_filename(out_dir / "residual_phase.nii.gz")
+            residual_phase_img.to_filename(out_dir / 'residual_phase.nii.gz')
             del residual, residual_phase, residual_phase_img
 
     return denoised_data
@@ -987,7 +976,7 @@ def sub_llr_processing(
         if patch_statuses[patch_num] == 2:
             # loading instead of processing
             # load file as soon as save, if more than 10 sec, just do the recon instead.
-            data_file = f"{filename}slice{patch_num}.pkl"
+            data_file = f'{filename}slice{patch_num}.pkl'
             # if file doesn't exist go to next slice
             if not os.path.isfile(data_file):
                 # identified as bad file and being identified for reprocessing
@@ -1002,9 +991,9 @@ def sub_llr_processing(
                     snr_weight,
                 )
             else:
-                with open(data_file, "rb") as f:
-                    DATA_full2 = pickle.load(f)
-                raise NotImplementedError("This block is never executed.")
+                with open(data_file, 'rb') as f:
+                    DATA_full2 = pickle.load(f)  # noqa: S301
+                raise NotImplementedError('This block is never executed.')
 
         if patch_statuses[patch_num] != 2:
             # block for other processes
@@ -1024,7 +1013,7 @@ def sub_llr_processing(
                         total_patch_weights=total_patch_weights,
                         patch_average_sub=patch_average_sub,
                     )
-                    raise NotImplementedError("This block is never executed.")
+                    raise NotImplementedError('This block is never executed.')
                 else:
                     x_patch_weights = total_patch_weights[x_patch_idx, :, :]
                     noise_x_patch = noise[x_patch_idx, :, :]
@@ -1063,7 +1052,7 @@ def sub_llr_processing(
 
         if patch_average:  # patch_average is always False
             denoised_data[x_patch_idx, ...] += DATA_full2
-            raise NotImplementedError("This block is never executed.")
+            raise NotImplementedError('This block is never executed.')
         else:
             denoised_data[x_patch_idx, :n_y, ...] += DATA_full2
 
@@ -1125,7 +1114,7 @@ def subfunction_loop_for_nvr_avg(
     total_patch_weights : np.ndarray of shape (kernel_size_x, n_y, n_z)
         Updated weighting array.
     """
-    raise NotImplementedError("This block is never executed.")
+    raise NotImplementedError('This block is never executed.')
     denoised_x_patch = np.zeros(k_space_x_patch.shape)
     sigmasq_2 = None
 
@@ -1159,8 +1148,7 @@ def subfunction_loop_for_nvr_avg(
                 n_volumes = k_space_patch_2d.shape[1]
                 R = np.min((n_voxels_in_patch, n_volumes))
                 scaling = (
-                    np.max((n_voxels_in_patch, n_volumes))
-                    - np.arange(R - centering, dtype=int)
+                    np.max((n_voxels_in_patch, n_volumes)) - np.arange(R - centering, dtype=int)
                 ) / n_volumes
                 vals = S
                 vals = (vals**2) / n_volumes
@@ -1174,9 +1162,7 @@ def subfunction_loop_for_nvr_avg(
                 sigmasq_1 = (cmean.T / scaling).T
 
                 # Second estimation of Sigma^2; Eq 2 from ISMRM presentation
-                gamma = (
-                    n_voxels_in_patch - np.arange(R - centering, dtype=int)
-                ) / n_volumes
+                gamma = (n_voxels_in_patch - np.arange(R - centering, dtype=int)) / n_volumes
                 rangeMP = 4 * np.sqrt(gamma)
                 rangeData = vals[: R - centering + 1] - vals[R - centering - 1]
                 sigmasq_2 = (rangeData[:, None] / rangeMP[None, :]).T
@@ -1198,14 +1184,12 @@ def subfunction_loop_for_nvr_avg(
             else:
                 y_patch_center = int(np.round(kernel_size_y / 2)) + (y_patch - 1)
                 z_patch_center = int(np.round(kernel_size_z / 2)) + (z_patch - 1)
-                denoised_x_patch[:, y_patch_center, z_patch_center, :] += (
-                    denoised_patch[
-                        0,
-                        int(np.round(denoised_patch.shape[1] / 2)),
-                        int(np.round(denoised_patch.shape[2] / 2)),
-                        :,
-                    ]
-                )
+                denoised_x_patch[:, y_patch_center, z_patch_center, :] += denoised_patch[
+                    0,
+                    int(np.round(denoised_patch.shape[1] / 2)),
+                    int(np.round(denoised_patch.shape[2] / 2)),
+                    :,
+                ]
                 total_patch_weights[:, y_patch_center, z_patch_center] += 1
 
     return denoised_x_patch, total_patch_weights
@@ -1332,15 +1316,13 @@ def subfunction_loop_for_nvr_avg_update(
                 S[S < 0] = 0
                 energy_scrub = 0
                 first_removed_component = 0
-                raise NotImplementedError("This block is never executed.")
+                raise NotImplementedError('This block is never executed.')
             elif soft_thrs == 10:  # USING MPPCA (gfactor estimation)
                 voxelwise_sums = np.sum(k_space_patch_2d, axis=1)
                 n_zero_voxels_in_patch = np.sum(voxelwise_sums == 0)
                 centering = 0
                 # Correction for some zero entries
-                n_nonzero_voxels_in_patch = (
-                    k_space_patch_2d.shape[0] - n_zero_voxels_in_patch
-                )
+                n_nonzero_voxels_in_patch = k_space_patch_2d.shape[0] - n_zero_voxels_in_patch
                 if n_nonzero_voxels_in_patch > 0:
                     n_volumes = k_space_patch_2d.shape[1]
                     R = np.min((n_nonzero_voxels_in_patch, n_volumes))
@@ -1353,10 +1335,7 @@ def subfunction_loop_for_nvr_avg_update(
 
                     # First estimation of Sigma^2;  Eq 1 from ISMRM presentation
                     csum = np.cumsum(vals[::-1][: R - centering])
-                    cmean = (
-                        csum[::-1][: R - centering]
-                        / np.arange(1, R + 1 - centering)[::-1]
-                    )
+                    cmean = csum[::-1][: R - centering] / np.arange(1, R + 1 - centering)[::-1]
                     sigmasq_1 = cmean / scaling  # 1D array with length n_volumes
 
                     # Second estimation of Sigma^2; Eq 2 from ISMRM presentation
@@ -1372,9 +1351,9 @@ def subfunction_loop_for_nvr_avg_update(
 
                     # MATLAB code used .\, which seems to be switched element-wise division
                     # MATLAB: 5 .\ 2 = 2 ./ 5
-                    energy_scrub = np.sqrt(
-                        np.sum(S[first_removed_component:])
-                    ) / np.sqrt(np.sum(S))
+                    energy_scrub = np.sqrt(np.sum(S[first_removed_component:])) / np.sqrt(
+                        np.sum(S)
+                    )
 
                     S[first_removed_component:] = 0
                 else:  # all zero entries
@@ -1389,7 +1368,7 @@ def subfunction_loop_for_nvr_avg_update(
                     (1, S.shape[0] - int(np.floor(n_removed_components * soft_thrs)))
                 )
                 S[first_removed_component:] = 0
-                raise NotImplementedError("This block is never executed.")
+                raise NotImplementedError('This block is never executed.')
 
             # Based on numpy svd documentation. Don't do np.dot(np.dot(U, np.diag(S)), V.T)!
             denoised_patch = np.dot(U * S, V)
@@ -1397,14 +1376,14 @@ def subfunction_loop_for_nvr_avg_update(
 
             if scale_patches:
                 patch_scale = S.shape[0] - n_removed_components
-                raise NotImplementedError("This block is never executed.")
+                raise NotImplementedError('This block is never executed.')
             else:
                 patch_scale = 1
 
             if first_removed_component is None:
                 # XXX: SHOULD BE UNREACHABLE
                 first_removed_component = 0
-                raise NotImplementedError("This block is never executed.")
+                raise NotImplementedError('This block is never executed.')
 
             if patch_avg:
                 # Update the entire patch
@@ -1423,12 +1402,8 @@ def subfunction_loop_for_nvr_avg_update(
                 # sigmasq_2 is only defined when soft_thrs == 10
                 if sigmasq_2 is not None:
                     x_patch_idx = np.arange(k_space_x_patch.shape[0])
-                    w1_slicex, w2_slicex, w3_slicex = np.ix_(
-                        x_patch_idx, y_patch_idx, z_patch_idx
-                    )
-                    noise[w1_slicex, w2_slicex, w3_slicex] += sigmasq_2[
-                        first_removed_component
-                    ]
+                    w1_slicex, w2_slicex, w3_slicex = np.ix_(x_patch_idx, y_patch_idx, z_patch_idx)
+                    noise[w1_slicex, w2_slicex, w3_slicex] += sigmasq_2[first_removed_component]
 
             else:
                 # Only update a single voxel in the middle of the patch
@@ -1445,19 +1420,15 @@ def subfunction_loop_for_nvr_avg_update(
                     ]
                 )
                 total_patch_weights[:, y_patch_center, z_patch_center] += patch_scale
-                component_threshold[:, y_patch_center, z_patch_center, :] += (
-                    n_removed_components
-                )
+                component_threshold[:, y_patch_center, z_patch_center, :] += n_removed_components
                 energy_removed[:, y_patch_center, z_patch_center] += energy_scrub
                 snr_weight[:, y_patch_center, z_patch_center] += (
                     S[0] / S[max(0, first_removed_component - 2)]
                 )
                 # sigmasq_2 is only defined when soft_thrs == 10
                 if sigmasq_2 is not None:
-                    noise[:, y_patch_center, z_patch_center] += sigmasq_2[
-                        first_removed_component
-                    ]
-                raise NotImplementedError("This block is never executed.")
+                    noise[:, y_patch_center, z_patch_center] += sigmasq_2[first_removed_component]
+                raise NotImplementedError('This block is never executed.')
 
     return (
         denoised_x_patch,
