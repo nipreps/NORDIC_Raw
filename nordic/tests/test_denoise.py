@@ -27,7 +27,7 @@ def _test_run_nordic_smoke(
 ):
     """Test the run_nordic function.
 
-    XXX: This test produces ~24 million sub-tests, so I need to reduce the number of
+    XXX: This test produces 768 sub-tests, so I need to reduce the number of
     parameters.
 
     This test parameterizes the input arguments to run_nordic, runs the function,
