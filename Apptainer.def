@@ -1,0 +1,37 @@
+Bootstrap: docker
+From: docker.io/library/python:3.12-slim
+
+%labels
+    Maintainer "NORDIC developers"
+    Description "Apptainer image providing the nordic Python CLI"
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export PIP_NO_CACHE_DIR=1
+
+%files
+    . /opt/src
+
+%post
+    set -eux
+    apt-get update
+    apt-get install -y --no-install-recommends git ca-certificates
+    rm -rf /var/lib/apt/lists/*
+
+    # Upgrade pip and install the package (build from source in /opt/src)
+    pip install --upgrade pip
+    pip install --no-cache-dir /opt/src
+
+    # Quick smoke test during build (don't fail build if help exits nonzero)
+    nordic --help >/dev/null 2>&1 || true
+
+%apprun
+    exec nordic "$@"
+
+%help
+    This container provides the `nordic` command.
+    Example usage:
+      apptainer run NORDIC.sif --magnitude MAG.nii.gz --out-dir out
+
+%test
+    nordic --help

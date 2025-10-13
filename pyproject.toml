@@ -42,7 +42,8 @@ tests = [
 all = ["nordic[dev,tests]"]
 
 [project.scripts]
-nordic = "nordic:_main"
+nordic = "nordic:cli.nordic_filewise.main"
+bids-nordic = "nordic:cli.nordic_dset.main"
 
 #
 # Hatch configurations
