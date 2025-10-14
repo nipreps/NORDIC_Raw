@@ -1,4 +1,4 @@
-"""Apply NORDIC to BIDS dataset."""
+"""Apply NORDIC to a BIDS dataset."""
 
 import os
 import shutil
