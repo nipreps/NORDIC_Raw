@@ -368,21 +368,21 @@ def main(args=None):
 
         # Collect phase and noRF files, when available and not ignored.
         phase_entities = {**entities, **{'part': 'phase'}}
-        phase_file = layout.get(**phase_entities)
+        phase_file = layout.get(return_type='file', **phase_entities)
         if phase_file and 'phase' not in kwargs['ignore']:
             phase_file = phase_file[0]
         else:
             phase_file = None
 
         mag_norf_entities = {**entities, **{'suffix': 'noRF'}}
-        mag_norf_file = layout.get(**mag_norf_entities)
+        mag_norf_file = layout.get(return_type='file', **mag_norf_entities)
         if mag_norf_file and 'norf' not in kwargs['ignore']:
             mag_norf_file = mag_norf_file[0]
         else:
             mag_norf_file = None
 
         phase_norf_entities = {**phase_entities, **{'suffix': 'noRF'}}
-        phase_norf_file = layout.get(**phase_norf_entities)
+        phase_norf_file = layout.get(return_type='file', **phase_norf_entities)
         if phase_norf_file and 'norf' not in kwargs['ignore'] and 'phase' not in kwargs['ignore']:
             phase_norf_file = phase_norf_file[0]
         else:
