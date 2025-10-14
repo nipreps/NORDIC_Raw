@@ -354,7 +354,7 @@ def main(args=None):
 
     # Loop over magnitude BOLD files.
     for bold_file in bold_files:
-        entities = layout.get_file(bold_file).entities
+        entities = layout.get_file(bold_file).get_entities()
         nonordic_entities = entities.copy()
 
         rec_ent = nonordic_entities.get('reconstruction', '')
