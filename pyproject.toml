@@ -22,7 +22,7 @@ requires-python = ">=3.8"
 dependencies = [
     "nibabel",
     "numpy",
-    "pybids",
+    "pybids==0.16.5",
     "scipy",
 ]
 dynamic = ["version"]
