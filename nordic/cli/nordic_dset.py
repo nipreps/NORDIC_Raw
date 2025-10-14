@@ -354,7 +354,7 @@ def main(args=None):
 
     # Loop over magnitude BOLD files.
     for bold_file in bold_files:
-        entities = layout.get_entities(bold_file)
+        entities = layout.get_file(bold_file).entities
         nonordic_entities = entities.copy()
 
         rec_ent = nonordic_entities.get('reconstruction', '')
@@ -367,7 +367,6 @@ def main(args=None):
 
         # Collect phase and noRF files, when available and not ignored.
         phase_entities = {**entities, **{'part': 'phase'}}
-        raise Exception(entities)
         phase_file = layout.get(**phase_entities)
         if phase_file and 'phase' not in kwargs['ignore']:
             phase_file = phase_file[0]
