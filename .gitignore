@@ -1,3 +1,4 @@
+*.sif
 _version.py
 .DS_Store
 figures/

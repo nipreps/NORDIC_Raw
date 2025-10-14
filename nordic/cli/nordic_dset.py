@@ -175,12 +175,14 @@ def get_parser():
             'Rather than modifying the gfactor map, this changes nvr_threshold.'
         ),
         default=1,
+        dest='factor_error',
     )
     g_nordic.add_argument(
         '--full-dynamic-range',
         action='store_true',
         help='Whether to use the full dynamic range. Default is False.',
         default=False,
+        dest='full_dynamic_range',
     )
     g_nordic.add_argument(
         '--temporal-phase',
@@ -188,6 +190,7 @@ def get_parser():
         type=int,
         help='Temporal phase. Default is 1.',
         default=1,
+        dest='temporal_phase',
     )
     g_nordic.add_argument(
         '--algorithm',
@@ -195,6 +198,7 @@ def get_parser():
         choices=['nordic', 'mppca', 'gfactor+mppca'],
         help='Algorithm to use. Default is "nordic".',
         default='nordic',
+        dest='algorithm',
     )
     g_nordic.add_argument(
         '--patch-overlap-gfactor',
@@ -202,6 +206,7 @@ def get_parser():
         type=int,
         help='Patch overlap for g-factor estimation. Default is 2.',
         default=2,
+        dest='patch_overlap_gfactor',
     )
     g_nordic.add_argument(
         '--kernel-size-gfactor',
@@ -209,6 +214,7 @@ def get_parser():
         type=int,
         help='Kernel size for g-factor estimation. Default is None.',
         default=None,
+        dest='kernel_size_gfactor',
     )
     g_nordic.add_argument(
         '--patch-overlap-pca',
@@ -216,6 +222,7 @@ def get_parser():
         type=int,
         help='Patch overlap for PCA. Default is 2.',
         default=2,
+        dest='patch_overlap_pca',
     )
     g_nordic.add_argument(
         '--kernel-size-pca',
@@ -223,12 +230,14 @@ def get_parser():
         type=int,
         help='Kernel size for PCA. Default is None.',
         default=None,
+        dest='kernel_size_pca',
     )
     g_nordic.add_argument(
         '--phase-slice-average-for-kspace-centering',
         action='store_true',
         help='Whether to average the phase slices for k-space centering. Default is False.',
         default=False,
+        dest='phase_slice_average_for_kspace_centering',
     )
     g_nordic.add_argument(
         '--phase-filter-width',
@@ -236,18 +245,21 @@ def get_parser():
         type=int,
         help='Width of the phase filter. Default is 3.',
         default=3,
+        dest='phase_filter_width',
     )
     g_nordic.add_argument(
         '--save-gfactor-map',
         action='store_true',
         help='Whether to save the g-factor map. Default is False.',
         default=False,
+        dest='save_gfactor_map',
     )
     g_nordic.add_argument(
         '--debug',
         action='store_true',
         help='If True, write out intermediate files for debugging. Default is False.',
         default=False,
+        dest='debug',
     )
     g_nordic.add_argument(
         '--scale-patches',
@@ -257,12 +269,14 @@ def get_parser():
             'removed by the patch or not. Default is False.'
         ),
         default=False,
+        dest='scale_patches',
     )
     g_nordic.add_argument(
         '--patch-average',
         action='store_true',
         help='Hardcoded as False in the MATLAB code (ARG.patch_average = 0).',
         default=False,
+        dest='patch_average',
     )
     g_nordic.add_argument(
         '--llr-scale',
@@ -274,6 +288,7 @@ def get_parser():
             'MATLAB code (ARG.llr_scale).'
         ),
         default=1,
+        dest='llr_scale',
     )
     return parser
 
@@ -296,7 +311,6 @@ def main(args=None):
         'phase_slice_average_for_kspace_centering',
         'phase_filter_width',
         'save_gfactor_map',
-        'soft_thrs',
         'debug',
         'scale_patches',
         'patch_average',
