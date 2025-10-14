@@ -406,21 +406,21 @@ def main(args=None):
         os.rename(bold_file, nonordic_bold_file)
         if phase_file:
             nonordic_phase_file = layout.build_path(
-                **{**phase_entities, **{'reconstruction': rec_ent}},
+                {**phase_entities, **{'reconstruction': rec_ent}},
             )
             print(f'Renaming {phase_file} to {nonordic_phase_file}')
             os.rename(phase_file, nonordic_phase_file)
 
         if mag_norf_file:
             nonordic_mag_norf_file = layout.build_path(
-                **{**mag_norf_entities, **{'reconstruction': rec_ent}},
+                {**mag_norf_entities, **{'reconstruction': rec_ent}},
             )
             print(f'Renaming {mag_norf_file} to {nonordic_mag_norf_file}')
             os.rename(mag_norf_file, nonordic_mag_norf_file)
 
         if phase_norf_file:
             nonordic_phase_norf_file = layout.build_path(
-                **{**phase_norf_entities, **{'reconstruction': rec_ent}},
+                {**phase_norf_entities, **{'reconstruction': rec_ent}},
             )
             print(f'Renaming {phase_norf_file} to {nonordic_phase_norf_file}')
             os.rename(phase_norf_file, nonordic_phase_norf_file)
