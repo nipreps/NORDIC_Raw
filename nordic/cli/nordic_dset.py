@@ -1,8 +1,12 @@
 """Apply NORDIC to BIDS dataset."""
 
+import os
+import shutil
 from argparse import ArgumentParser, RawTextHelpFormatter
 from functools import partial
 from pathlib import Path
+
+from bids.layout import BIDSLayout
 
 from nordic import denoise
 
@@ -80,6 +84,15 @@ def get_parser():
             'Processing stage to be run, only "participant" in the case of '
             'NORDIC (see BIDS-Apps specification).'
         ),
+    )
+
+    parser.add_argument(
+        '-w',
+        '--work-dir',
+        action='store',
+        type=Path,
+        default=Path('work').absolute(),
+        help='path where intermediate results should be stored',
     )
 
     g_bids = parser.add_argument_group('Options for filtering BIDS queries')
@@ -270,7 +283,142 @@ def main(args=None):
     opts = get_parser().parse_args(args)
     kwargs = vars(opts)
 
-    denoise.run_nordic(**kwargs)
+    # Split parameters into BIDS, NORDIC, and other.
+    nordic_params = [
+        'factor_error',
+        'full_dynamic_range',
+        'temporal_phase',
+        'algorithm',
+        'patch_overlap_gfactor',
+        'kernel_size_gfactor',
+        'patch_overlap_pca',
+        'kernel_size_pca',
+        'phase_slice_average_for_kspace_centering',
+        'phase_filter_width',
+        'save_gfactor_map',
+        'soft_thrs',
+        'debug',
+        'scale_patches',
+        'patch_average',
+        'llr_scale',
+    ]
+    nordic_kwargs = {param: kwargs[param] for param in nordic_params}
+
+    output_dir = kwargs['output_dir']
+    bids_dir = kwargs['bids_dir']
+    work_dir = kwargs['work_dir']
+    os.makedirs(work_dir, exist_ok=True)
+
+    bids_filters = kwargs['bids_filters']
+    bids_filters = bids_filters if bids_filters else {}
+    if kwargs['participant_label']:
+        bids_filters['subject'] = kwargs['participant_label']
+    if kwargs['session_id']:
+        bids_filters['session'] = kwargs['session_id']
+    if kwargs['run_id']:
+        bids_filters['run'] = kwargs['run_id']
+    if kwargs['task_id']:
+        bids_filters['task'] = kwargs['task_id']
+
+    if output_dir == bids_dir:
+        print('Performing pseudo-raw denoising.')
+    else:
+        print('Writing out denoised data to a separate directory.')
+        os.makedirs(output_dir, exist_ok=True)
+
+    # Collect magnitude BOLD files.
+    layout = BIDSLayout(bids_dir, validate=False)
+    bold_files = layout.get(
+        return_type='file',
+        part='mag',
+        suffix='bold',
+        extension='nii.gz',
+        **bids_filters,
+    )
+    bold_files = [file for file in bold_files if 'nonordic' not in file]
+    print(f'Found {len(bold_files)} magnitude BOLD files.')
+
+    # Loop over magnitude BOLD files.
+    for bold_file in bold_files:
+        entities = layout.get_entities(bold_file)
+        nonordic_entities = entities.copy()
+
+        rec_ent = nonordic_entities.get('reconstruction', '')
+        rec_ent += 'nonordic'
+
+        nonordic_entities['reconstruction'] = rec_ent
+        if layout.get(**nonordic_entities):
+            print('Non-NORDIC file already exists. Skipping.')
+            continue
+
+        # Collect phase and noRF files, when available and not ignored.
+        phase_entities = {**entities, **{'part': 'phase'}}
+        phase_file = layout.get(**phase_entities)
+        if phase_file and 'phase' not in kwargs['ignore']:
+            phase_file = phase_file[0]
+        else:
+            phase_file = None
+
+        mag_norf_entities = {**entities, **{'suffix': 'noRF'}}
+        mag_norf_file = layout.get(**mag_norf_entities)
+        if mag_norf_file and 'norf' not in kwargs['ignore']:
+            mag_norf_file = mag_norf_file[0]
+        else:
+            mag_norf_file = None
+
+        phase_norf_entities = {**phase_entities, **{'suffix': 'noRF'}}
+        phase_norf_file = layout.get(**phase_norf_entities)
+        if phase_norf_file and 'norf' not in kwargs['ignore'] and 'phase' not in kwargs['ignore']:
+            phase_norf_file = phase_norf_file[0]
+        else:
+            phase_norf_file = None
+
+        # Run NORDIC in working directory.
+        work_stem = os.path.basename(bold_file).split('.')[0]
+        run_work_dir = work_dir / work_stem
+        os.makedirs(run_work_dir, exist_ok=True)
+        denoise.run_nordic(
+            out_dir=run_work_dir,
+            mag_file=bold_file,
+            pha_file=phase_file,
+            mag_norf_file=mag_norf_file,
+            pha_norf_file=phase_norf_file,
+            **nordic_kwargs,
+        )
+
+        # Rename original files to include rec-nonordic.
+        nonordic_bold_file = layout.build_path(nonordic_entities)
+        print(f'Renaming {bold_file} to {nonordic_bold_file}')
+        os.rename(bold_file, nonordic_bold_file)
+        if phase_file:
+            nonordic_phase_file = layout.build_path(
+                **{**phase_entities, **{'reconstruction': rec_ent}},
+            )
+            print(f'Renaming {phase_file} to {nonordic_phase_file}')
+            os.rename(phase_file, nonordic_phase_file)
+
+        if mag_norf_file:
+            nonordic_mag_norf_file = layout.build_path(
+                **{**mag_norf_entities, **{'reconstruction': rec_ent}},
+            )
+            print(f'Renaming {mag_norf_file} to {nonordic_mag_norf_file}')
+            os.rename(mag_norf_file, nonordic_mag_norf_file)
+
+        if phase_norf_file:
+            nonordic_phase_norf_file = layout.build_path(
+                **{**phase_norf_entities, **{'reconstruction': rec_ent}},
+            )
+            print(f'Renaming {phase_norf_file} to {nonordic_phase_norf_file}')
+            os.rename(phase_norf_file, nonordic_phase_norf_file)
+
+        # Copy denoised data to output directory with original names.
+        denoised_magnitude_file = run_work_dir / 'magn.nii.gz'
+        print(f'Copying {denoised_magnitude_file} to {output_dir}')
+        shutil.copyfile(denoised_magnitude_file, bold_file.replace(bids_dir, output_dir))
+        if phase_file:
+            denoised_phase_file = run_work_dir / 'phase.nii.gz'
+            print(f'Copying {denoised_phase_file} to {output_dir}')
+            shutil.copyfile(denoised_phase_file, phase_file.replace(bids_dir, output_dir))
 
 
 if __name__ == '__main__':
