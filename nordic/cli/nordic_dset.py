@@ -367,7 +367,7 @@ def main(args=None):
 
         # Collect phase and noRF files, when available and not ignored.
         phase_entities = {**entities, **{'part': 'phase'}}
-        raise Exception(phase_entities)
+        raise Exception(entities)
         phase_file = layout.get(**phase_entities)
         if phase_file and 'phase' not in kwargs['ignore']:
             phase_file = phase_file[0]
