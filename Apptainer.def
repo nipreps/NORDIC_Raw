@@ -25,7 +25,7 @@ From: docker.io/library/python:3.12-slim
     # Quick smoke test during build (don't fail build if help exits nonzero)
     nordic --help >/dev/null 2>&1 || true
 
-%apprun
+%runscript
     exec nordic "$@"
 
 %help
