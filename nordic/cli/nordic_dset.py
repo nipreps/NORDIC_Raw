@@ -427,11 +427,11 @@ def main(args=None):
             os.rename(phase_norf_file, nonordic_phase_norf_file)
 
         # Copy denoised data to output directory with original names.
-        denoised_magnitude_file = run_work_dir / 'magn.nii.gz'
+        denoised_magnitude_file = os.path.join(run_work_dir, 'magn.nii.gz')
         print(f'Copying {denoised_magnitude_file} to {output_dir}')
         shutil.copyfile(denoised_magnitude_file, bold_file.replace(bids_dir, output_dir))
         if phase_file:
-            denoised_phase_file = run_work_dir / 'phase.nii.gz'
+            denoised_phase_file = os.path.join(run_work_dir, 'phase.nii.gz')
             print(f'Copying {denoised_phase_file} to {output_dir}')
             shutil.copyfile(denoised_phase_file, phase_file.replace(bids_dir, output_dir))
 
