@@ -390,7 +390,7 @@ def main(args=None):
 
         # Run NORDIC in working directory.
         work_stem = os.path.basename(bold_file).split('.')[0]
-        run_work_dir = work_dir / work_stem
+        run_work_dir = os.path.join(work_dir, work_stem)
         os.makedirs(run_work_dir, exist_ok=True)
         denoise.run_nordic(
             out_dir=run_work_dir,
