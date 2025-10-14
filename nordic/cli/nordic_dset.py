@@ -319,9 +319,9 @@ def main(args=None):
     ]
     nordic_kwargs = {param: kwargs[param] for param in nordic_params}
 
-    output_dir = kwargs['output_dir']
-    bids_dir = kwargs['bids_dir']
-    work_dir = kwargs['work_dir']
+    output_dir = str(kwargs['output_dir'].resolve())
+    bids_dir = str(kwargs['bids_dir'].resolve())
+    work_dir = str(kwargs['work_dir'].resolve())
     os.makedirs(work_dir, exist_ok=True)
 
     bids_filters = kwargs['bids_filters']
