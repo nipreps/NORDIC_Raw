@@ -9,6 +9,7 @@ from pathlib import Path
 from bids.layout import BIDSLayout
 
 from nordic import denoise
+from nordic.data import load as load_data
 
 
 def get_parser():
@@ -341,7 +342,7 @@ def main(args=None):
         os.makedirs(output_dir, exist_ok=True)
 
     # Collect magnitude BOLD files.
-    layout = BIDSLayout(bids_dir, validate=False)
+    layout = BIDSLayout(bids_dir, validate=False, config=['bids', str(load_data('config.json'))])
     bold_files = layout.get(
         return_type='file',
         part='mag',

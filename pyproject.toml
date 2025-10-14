@@ -20,6 +20,7 @@ classifiers = [
 ]
 requires-python = ">=3.8"
 dependencies = [
+    "acres",
     "nibabel",
     "numpy",
     "pybids==0.16.5",
