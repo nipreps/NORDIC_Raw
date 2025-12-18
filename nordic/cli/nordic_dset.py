@@ -95,6 +95,16 @@ def get_parser():
         default=Path('work').absolute(),
         help='path where intermediate results should be stored',
     )
+    parser.add_argument(
+        '--derivatives',
+        action='store',
+        type=Path,
+        help=(
+            'path to the derivatives directory. '
+            'In pseudo-raw denoising, extra NORDIC derivatives will be written here.'
+        ),
+        default=None,
+    )
 
     g_bids = parser.add_argument_group('Options for filtering BIDS queries')
     g_bids.add_argument(
@@ -337,9 +347,15 @@ def main(args=None):
 
     if output_dir == bids_dir:
         print('Performing pseudo-raw denoising.')
+        if kwargs['derivatives']:
+            print(f'Writing out useful NORDIC derivatives to {kwargs["derivatives"]}')
+            os.makedirs(kwargs['derivatives'], exist_ok=True)
     else:
         print('Writing out denoised data to a separate directory.')
         os.makedirs(output_dir, exist_ok=True)
+        if kwargs['derivatives']:
+            print('"--derivatives" specified, but will have no effect.')
+            kwargs['derivatives'] = None
 
     # Collect magnitude BOLD files.
     layout = BIDSLayout(bids_dir, validate=False, config=['bids', str(load_data('config.json'))])
@@ -434,6 +450,56 @@ def main(args=None):
             denoised_phase_file = os.path.join(run_work_dir, 'phase.nii.gz')
             print(f'Copying {denoised_phase_file} to {output_dir}')
             shutil.copyfile(denoised_phase_file, phase_file.replace(bids_dir, output_dir))
+
+        if kwargs['derivatives']:
+            print(f'Copying useful NORDIC derivatives to {kwargs["derivatives"]}')
+            bids_sub_dir = os.path.relpath(os.path.dirname(bold_file), bids_dir)
+            derivatives_sub_dir = os.path.join(kwargs['derivatives'], bids_sub_dir)
+            os.makedirs(derivatives_sub_dir, exist_ok=True)
+            if '_part-' in bold_file:
+                split_ent = '_part-'
+            else:
+                split_ent = '_bold'
+
+            derivatives_stem = os.path.basename(bold_file).split(split_ent)[0]
+            derivatives_sub_dir = Path(derivatives_sub_dir)
+
+            gfactor_file = os.path.join(run_work_dir, 'gfactor.nii.gz')
+            if os.path.exists(gfactor_file):
+                shutil.copyfile(
+                    gfactor_file,
+                    derivatives_sub_dir / f'{derivatives_stem}_desc-gfactor_statmap.nii.gz',
+                )
+            noise_file = os.path.join(run_work_dir, 'noise.nii.gz')
+            if os.path.exists(noise_file):
+                shutil.copyfile(
+                    noise_file,
+                    derivatives_sub_dir / f'{derivatives_stem}_desc-noise_statmap.nii.gz',
+                )
+            energy_removed_file = os.path.join(run_work_dir, 'energy_removed.nii.gz')
+            if os.path.exists(energy_removed_file):
+                shutil.copyfile(
+                    energy_removed_file,
+                    derivatives_sub_dir / f'{derivatives_stem}_desc-energyRemoved_statmap.nii.gz',
+                )
+            snr_weight_file = os.path.join(run_work_dir, 'snr_weight.nii.gz')
+            if os.path.exists(snr_weight_file):
+                shutil.copyfile(
+                    snr_weight_file,
+                    derivatives_sub_dir / f'{derivatives_stem}_desc-snrWeight_statmap.nii.gz',
+                )
+            n_components_removed_file = os.path.join(run_work_dir, 'n_components_removed.nii.gz')
+            if os.path.exists(n_components_removed_file):
+                shutil.copyfile(
+                    n_components_removed_file,
+                    derivatives_sub_dir / f'{derivatives_stem}_desc-nComponentsRemoved_statmap.nii.gz',
+                )
+            n_patch_runs_file = os.path.join(run_work_dir, 'n_patch_runs.nii.gz')
+            if os.path.exists(n_patch_runs_file):
+                shutil.copyfile(
+                    n_patch_runs_file,
+                    derivatives_sub_dir / f'{derivatives_stem}_desc-nPatchRuns_statmap.nii.gz',
+                )
 
 
 if __name__ == '__main__':
