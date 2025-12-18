@@ -355,7 +355,7 @@ def main(args=None):
         os.makedirs(output_dir, exist_ok=True)
         if kwargs['derivatives']:
             print('"--derivatives" specified, but will have no effect.')
-            kwargs['derivatives'] = None
+            kwargs['derivatives'] = output_dir
 
     # Collect magnitude BOLD files.
     layout = BIDSLayout(bids_dir, validate=False, config=['bids', str(load_data('config.json'))])
