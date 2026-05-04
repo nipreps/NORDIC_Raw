@@ -160,6 +160,18 @@ def get_parser():
         ),
         default=1,
     )
+    parser.add_argument(
+        '--prefix',
+        action='store',
+        type=str,
+        help=(
+            'String prepended to every output filename. Default is "" (no prefix). '
+            'Pass e.g. "sub-01_" to write sub-01_magn.nii.gz, sub-01_phase.nii.gz, '
+            'etc. The user supplies any separator they want — the prefix is '
+            'concatenated literally onto the existing names.'
+        ),
+        default='',
+    )
     return parser
 
 

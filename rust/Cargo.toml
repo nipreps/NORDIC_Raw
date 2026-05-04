@@ -1,0 +1,53 @@
+[package]
+name = "nordic-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Taylor Salo"]
+description = "Rust port of the NORDIC denoising pipeline (mirrors nordic/denoise.py)"
+license = "MIT"
+repository = "https://github.com/nipreps/nordic"
+publish = false
+
+[lib]
+name = "nordic_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nordic-rs"
+path = "src/bin/nordic-rs.rs"
+
+[dependencies]
+# NIfTI-1/2 reader/writer. The default `ndarray_volumes` feature lets us pull
+# the voxel array out as an ndarray::Array directly.
+nifti = "0.17"
+# Multi-dimensional arrays. The "rayon" feature gives us parallel Zip iteration.
+ndarray = { version = "0.16", features = ["rayon"] }
+# Complex<f32> type. Re-exported by faer as `c32`.
+num-complex = "0.4"
+# Pure-Rust 1D FFT. We build 2D FFT on top of it; no system FFTW required.
+rustfft = "6"
+# Pure-Rust dense linear algebra. We use it for the complex SVD on each
+# patch. `default` pulls in a broken `npy` feature on Windows (npyz isn't
+# included as a real dep), so we opt out and re-enable just what we need.
+faer = { version = "0.22", default-features = false, features = ["std", "linalg", "rayon"] }
+# Outer parallelism over the kept x-patches.
+rayon = "1"
+# CLI parser, derive style.
+clap = { version = "4", features = ["derive"] }
+# Typed errors.
+thiserror = "2"
+# Structured logging — replaces Python's `print(...)`.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Deterministic RNG for the NVR threshold draws and zero-fill branch.
+rand = "0.9"
+rand_distr = "0.5"
+
+[dev-dependencies]
+approx = "0.5"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -1,11 +1,180 @@
 """Another Python attempt at NORDIC."""
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import NamedTuple
 
 import nibabel as nb
 import numpy as np
 from scipy.signal.windows import tukey
+from tqdm.auto import tqdm
+
+
+class XPatchUpdate(NamedTuple):
+    """Additive contribution of a single x-patch to the global accumulators.
+
+    Each field has its leading axis of length ``kernel_size[0]`` and is meant
+    to be added (``+=``) into the corresponding global array starting at row
+    ``x_start``. Building these per-patch deltas instead of read-modify-writing
+    a shared array is what makes the patch loop safe to run from multiple
+    threads.
+    """
+
+    x_start: int
+    denoised: np.ndarray  # (kx, n_y, n_z, n_vols), complex
+    weights: np.ndarray  # (kx, n_y, n_z), int
+    noise: np.ndarray  # (kx, n_y, n_z), complex
+    component_threshold: np.ndarray  # (kx, n_y, n_z), float
+    energy_removed: np.ndarray  # (kx, n_y, n_z), float
+    snr_weight: np.ndarray  # (kx, n_y, n_z), float
+
+
+def _compute_x_patch_contribution(
+    *,
+    data,
+    patch_num,
+    kernel_size,
+    nvr_threshold,
+    llr_scale,
+    soft_thrs,
+    patch_average_sub,
+    scale_patches,
+):
+    """Compute one x-patch's additive contribution to the global accumulators.
+
+    Pure function: the only input that escapes the call is the returned
+    ``XPatchUpdate`` and ``data`` is read-only. ``subfunction_loop_for_nvr_avg_update``
+    operates only on its arguments and per-call locals (LAPACK ``svd``,
+    array reshapes, broadcast multiplies), so calling this function from
+    multiple threads concurrently has no shared mutable state and no races.
+    """
+    x_patch_idx = np.arange(0, kernel_size[0], dtype=int) + patch_num
+    k_space_x_patch = data[x_patch_idx, :, :, :]
+    lambda_thresh = llr_scale * nvr_threshold
+
+    kx = kernel_size[0]
+    n_y = data.shape[1]
+    n_z = data.shape[2]
+
+    weights_x = np.zeros((kx, n_y, n_z), dtype=int)
+    noise_x = np.zeros((kx, n_y, n_z), dtype=k_space_x_patch.dtype)
+    ct_x = np.zeros((kx, n_y, n_z), dtype=float)
+    er_x = np.zeros((kx, n_y, n_z), dtype=float)
+    sw_x = np.zeros((kx, n_y, n_z), dtype=float)
+
+    (
+        denoised_x_patch,
+        weights_x,
+        noise_x,
+        ct_x,
+        er_x,
+        sw_x,
+    ) = subfunction_loop_for_nvr_avg_update(
+        k_space_x_patch=k_space_x_patch,
+        kernel_size_z=kernel_size[2],
+        kernel_size_y=kernel_size[1],
+        lambda_thresh=lambda_thresh,
+        patch_avg=True,
+        soft_thrs=soft_thrs,
+        total_patch_weights=weights_x,
+        noise=noise_x,
+        component_threshold=ct_x,
+        energy_removed=er_x,
+        snr_weight=sw_x,
+        scale_patches=scale_patches,
+        patch_average_sub=patch_average_sub,
+    )
+
+    return XPatchUpdate(
+        x_start=int(patch_num),
+        denoised=denoised_x_patch,
+        weights=weights_x,
+        noise=noise_x,
+        component_threshold=ct_x,
+        energy_removed=er_x,
+        snr_weight=sw_x,
+    )
+
+
+def _run_x_patches_parallel(
+    *,
+    data,
+    kept_x_patches,
+    kernel_size,
+    nvr_threshold,
+    llr_scale,
+    soft_thrs,
+    patch_average_sub,
+    scale_patches,
+    n_jobs,
+    desc,
+):
+    """Yield ``XPatchUpdate`` objects in increasing ``x_start`` order.
+
+    This is a generator, not a list-returning function: each per-patch
+    buffer (the largest field, ``denoised``, is ~``kx*ny*nz*nvols`` complex
+    elements) is freed as soon as the caller advances to the next yielded
+    update. Materialising all updates at once would cost
+    ``len(kept_x_patches) * patch_size`` of transient memory on top of the
+    already-resident ``data`` / ``denoised_data`` arrays — enough to push a
+    real fMRI run into OOM.
+
+    Yielding in increasing ``x_start`` order — even for the parallel path,
+    where workers complete out of order — guarantees the caller's ``+=``
+    reduction is done in the same order as the original sequential loop, so
+    the final accumulator values are deterministic and bit-identical to a
+    serial run regardless of ``n_jobs``.
+
+    ``n_jobs``: ``None`` → ``os.cpu_count()`` workers, ``1`` → no thread
+    pool (run in the calling thread). NumPy's BLAS may itself be
+    multithreaded; for best performance set ``OMP_NUM_THREADS=1`` /
+    ``MKL_NUM_THREADS=1`` (or use ``threadpoolctl``) so the BLAS does not
+    oversubscribe on top of our thread pool.
+    """
+
+    def proc(i):
+        return _compute_x_patch_contribution(
+            data=data,
+            patch_num=i,
+            kernel_size=kernel_size,
+            nvr_threshold=nvr_threshold,
+            llr_scale=llr_scale,
+            soft_thrs=soft_thrs,
+            patch_average_sub=patch_average_sub,
+            scale_patches=scale_patches,
+        )
+
+    n_workers = n_jobs if n_jobs is not None else (os.cpu_count() or 1)
+    n_workers = max(1, min(n_workers, len(kept_x_patches) or 1))
+
+    if n_workers <= 1:
+        for i in tqdm(kept_x_patches, desc=desc, unit='patch'):
+            yield proc(i)
+        return
+
+    sorted_kept = sorted(kept_x_patches)
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = [executor.submit(proc, i) for i in sorted_kept]
+        # Hold completed-but-not-yet-yielded updates keyed by x_start. Bounded
+        # in expectation by ~n_workers; bounded in the worst case (workers
+        # finish in reverse order) by len(sorted_kept). Each entry is one
+        # XPatchUpdate, not the whole list.
+        pending = {}
+        next_kept_idx = 0
+        with tqdm(total=len(futures), desc=desc, unit='patch') as pbar:
+            for future in as_completed(futures):
+                update = future.result()
+                pending[update.x_start] = update
+                pbar.update(1)
+                # Drain any prefix of pending that is now contiguous with
+                # what we have already yielded.
+                while (
+                    next_kept_idx < len(sorted_kept)
+                    and sorted_kept[next_kept_idx] in pending
+                ):
+                    yield pending.pop(sorted_kept[next_kept_idx])
+                    next_kept_idx += 1
 
 
 def estimate_noise_level(noise_data, is_complex=False):
@@ -53,6 +222,8 @@ def run_nordic(
     scale_patches=False,
     patch_average=False,
     llr_scale=1,
+    n_jobs=1,
+    prefix='',
 ):
     """Run NORDIC.
 
@@ -124,6 +295,35 @@ def run_nordic(
         Local low-rank scaling factor for the denoising step. Default is 1.
         Hardcoded as 0 for g-factor estimation and 1 for denoising in the MATLAB code
         (ARG.llr_scale).
+    n_jobs : int or None
+        Number of worker threads for the patch-wise SVD loops in the g-factor
+        and denoising stages. Default is ``1`` (no thread pool, runs in the
+        calling thread). ``None`` means "auto", i.e. ``os.cpu_count()``
+        workers. Per-patch contributions are reduced into the global
+        accumulators in sorted x-patch order, so the result is deterministic
+        and bit-identical to a serial run regardless of ``n_jobs``.
+
+        IMPORTANT: NumPy's underlying BLAS (OpenBLAS, MKL, Accelerate) is
+        itself multithreaded by default. Running ``n_jobs > 1`` Python
+        threads, each calling ``np.linalg.svd``, on top of a BLAS that is
+        already using ``os.cpu_count()`` threads will oversubscribe and is
+        usually *slower* than serial. To get a real speedup, constrain BLAS
+        to one thread per worker before importing NumPy::
+
+            OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \\
+                python -m nordic ...
+
+        or, programmatically::
+
+            from threadpoolctl import threadpool_limits
+            with threadpool_limits(1, user_api="blas"):
+                run_nordic(..., n_jobs=8)
+
+    prefix : str
+        String prepended to every output filename. Default is ``''`` (no
+        prefix). Pass e.g. ``'sub-01_'`` to write ``sub-01_magn.nii.gz``,
+        ``sub-01_phase.nii.gz``, etc. The user supplies any separator they
+        want — ``prefix`` is concatenated literally onto the existing names.
 
     Notes
     -----
@@ -220,6 +420,10 @@ def run_nordic(
     assert phase_filter_width in range(1, 11)
 
     out_dir = Path(out_dir)
+    # Auto-create the output directory (matches behaviour of most CLI tools).
+    # `parents=True` builds any missing intermediate dirs; `exist_ok=True`
+    # keeps this idempotent so re-runs don't error.
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     img = nb.load(mag_file)
     mag_data = img.get_fdata()
@@ -266,8 +470,10 @@ def run_nordic(
 
         # Combine magnitude and phase into complex-valued data
         complex_data = mag_data * np.exp(1j * pha_data)
+        del pha_data
     else:
         complex_data = mag_data.copy()
+    del mag_data  # only ever rebound below (debug branch); freed here to cut peak memory
 
     n_x, n_y, n_slices, n_vols = complex_data.shape
 
@@ -313,12 +519,12 @@ def run_nordic(
     if has_complex and debug:
         mag_data = np.abs(demod_complex_data * absolute_scale)
         mag_img = nb.Nifti1Image(mag_data, img.affine, img.header)
-        mag_img.to_filename(out_dir / 'magn_pregfactor_normalized.nii.gz')
+        mag_img.to_filename(out_dir / f'{prefix}magn_pregfactor_normalized.nii.gz')
 
         pha_data = np.angle(demod_complex_data * absolute_scale)
         pha_data = (pha_data / (2 * np.pi) + range_center) * range_norm
         pha_img = nb.Nifti1Image(pha_data, img.affine, img.header)
-        pha_img.to_filename(out_dir / 'phase_pregfactor_normalized.nii.gz')
+        pha_img.to_filename(out_dir / f'{prefix}phase_pregfactor_normalized.nii.gz')
         del mag_data, pha_data
 
     # Estimate the g-factor map
@@ -343,6 +549,8 @@ def run_nordic(
             save_gfactor_map=save_gfactor_map,
             debug=debug,
             patch_average=patch_average,
+            n_jobs=n_jobs,
+            prefix=prefix,
         )
     else:
         # MPPCA mode doesn't use g-factor correction
@@ -357,20 +565,23 @@ def run_nordic(
         data_has_zero_elements = True
 
     # Overwrite demod_complex_data with the original data
-    # meanphase isn't anything useful (just complex-valued zeros)
-    demod_complex_data = complex_data.copy() * np.exp(-1j * np.angle(meanphase[..., None]))
+    # meanphase isn't anything useful (just complex-valued zeros).
+    # The original explicit ``.copy()`` was redundant because ``*`` already
+    # returns a fresh array; dropping it avoids a 4D-complex transient.
+    demod_complex_data = complex_data * np.exp(-1j * np.angle(meanphase[..., None]))
+    del complex_data  # never read after this; frees one full 4D complex array
     demod_complex_data = demod_complex_data / gfactor[..., None]
 
     # Write out corrected magnitude and phase images
     if has_complex and debug:
         mag_data = np.abs(demod_complex_data * absolute_scale)
         mag_img = nb.Nifti1Image(mag_data, img.affine, img.header)
-        mag_img.to_filename(out_dir / 'magn_gfactor_normalized.nii.gz')
+        mag_img.to_filename(out_dir / f'{prefix}magn_gfactor_normalized.nii.gz')
 
         pha_data = np.angle(demod_complex_data * absolute_scale)
         pha_data = (pha_data / (2 * np.pi) + range_center) * range_norm
         pha_img = nb.Nifti1Image(pha_data, img.affine, img.header)
-        pha_img.to_filename(out_dir / 'phase_gfactor_normalized.nii.gz')
+        pha_img.to_filename(out_dir / f'{prefix}phase_gfactor_normalized.nii.gz')
         del mag_data, pha_data
 
     # Calculate noise level from noise volumes
@@ -382,29 +593,26 @@ def run_nordic(
         measured_noise = 1
 
     if temporal_phase == 3:
-        # Secondary step for filtered phase with residual spikes
-        for i_slice in range(n_slices)[::-1]:
-            for j_vol in range(n_vols):
-                slice_data = demod_complex_data[:, :, i_slice, j_vol]
-                filtered_phase_slice = filtered_phase[:, :, i_slice, j_vol]
-                phase_diff = np.angle(slice_data / filtered_phase_slice)
-                mask = (np.abs(phase_diff) > 1) * (np.abs(slice_data) > np.sqrt(2))
-                temp_filtered_phase_slice = filtered_phase_slice.copy()
-                temp_filtered_phase_slice[mask] = slice_data[mask]
-                filtered_phase[:, :, i_slice, j_vol] = temp_filtered_phase_slice
+        # Stricter spike replacement than temporal_phase==2: also requires
+        # the demodulated magnitude to exceed sqrt(2). Vectorized over the 4D
+        # array; equivalent to the original per-slice mask-and-overwrite.
+        mask = (np.abs(np.angle(demod_complex_data / filtered_phase)) > 1) & (
+            np.abs(demod_complex_data) > np.sqrt(2)
+        )
+        filtered_phase[mask] = demod_complex_data[mask]
 
     if debug:
         filtered_phase_magn_img = nb.Nifti1Image(np.abs(filtered_phase), img.affine, img.header)
-        filtered_phase_magn_img.to_filename(out_dir / 'filtered_phase_magn.nii.gz')
+        filtered_phase_magn_img.to_filename(out_dir / f'{prefix}filtered_phase_magn.nii.gz')
         del filtered_phase_magn_img
 
         filtered_phase_phase_img = nb.Nifti1Image(np.angle(filtered_phase), img.affine, img.header)
-        filtered_phase_phase_img.to_filename(out_dir / 'filtered_phase_phase.nii.gz')
+        filtered_phase_phase_img.to_filename(out_dir / f'{prefix}filtered_phase_phase.nii.gz')
         del filtered_phase_phase_img
 
         # Same as DD_phase written out by MATLAB version
         filtered_phase_real_img = nb.Nifti1Image(filtered_phase.real, img.affine, img.header)
-        filtered_phase_real_img.to_filename(out_dir / 'filtered_phase_real.nii.gz')
+        filtered_phase_real_img.to_filename(out_dir / f'{prefix}filtered_phase_real.nii.gz')
         del filtered_phase_real_img
 
     demod_complex_data = demod_complex_data * np.exp(-1j * np.angle(filtered_phase))
@@ -412,16 +620,18 @@ def run_nordic(
     demod_complex_data[np.isinf(demod_complex_data)] = 0
 
     if data_has_zero_elements:
-        # Fill in zero elements with random noise?
+        # Fill all-zero voxels with i.i.d. complex Gaussian noise across volumes.
+        # The original drew (real, imag) blocks per volume in sequence; here we
+        # draw the whole (n_vols, num_zero_elements) block at once. RNG order
+        # therefore differs from the loop, but the statistical distribution is
+        # identical and run_nordic uses the unseeded global RNG, so the
+        # function is already non-reproducible run-to-run.
         zero_mask = np.sum(np.abs(demod_complex_data), axis=3) == 0
-        num_zero_elements = np.sum(zero_mask)
-        for i_vol in range(n_vols):
-            volume_data = demod_complex_data[:, :, :, i_vol]
-            volume_data[zero_mask] = (
-                np.random.normal(size=num_zero_elements)
-                + 1j * np.random.normal(size=num_zero_elements)
-            ) / np.sqrt(2)
-            demod_complex_data[:, :, :, i_vol] = volume_data
+        num_zero_elements = int(np.sum(zero_mask))
+        real_part = np.random.normal(size=(n_vols, num_zero_elements))
+        imag_part = np.random.normal(size=(n_vols, num_zero_elements))
+        samples = (real_part + 1j * imag_part) / np.sqrt(2)
+        demod_complex_data[zero_mask, :] = samples.T
 
     # Denoise the data with NORDIC or MP-PCA
     denoised_complex = denoise_data(
@@ -439,12 +649,18 @@ def run_nordic(
         llr_scale=llr_scale,
         scale_patches=scale_patches,
         debug=debug,
+        n_jobs=n_jobs,
+        prefix=prefix,
     )
+    del demod_complex_data  # not used past denoise_data; frees one full 4D complex array
 
-    # Rescale the denoised data
-    denoised_complex = denoised_complex * gfactor[:, :, :, None]
+    # Rescale the denoised data. Each step is done in-place to avoid full-size
+    # 4D-complex transients that the original ``x = x * y`` form created.
+    denoised_complex *= gfactor[:, :, :, None]
+    del gfactor
     denoised_complex *= np.exp(1j * np.angle(filtered_phase))
-    denoised_complex = denoised_complex * absolute_scale  # rescale the data
+    del filtered_phase  # frees one full 4D complex array right at the post-NORDIC peak
+    denoised_complex *= absolute_scale
     denoised_complex[np.isnan(denoised_complex)] = 0
 
     denoised_magn = np.abs(denoised_complex)  # remove g-factor and noise for DUAL 1
@@ -458,7 +674,7 @@ def run_nordic(
         denoised_magn = denoised_magn[..., :-n_noise_vols]
 
     denoised_magn = nb.Nifti1Image(denoised_magn, img.affine, img.header)
-    denoised_magn.to_filename(out_dir / 'magn.nii.gz')
+    denoised_magn.to_filename(out_dir / f'{prefix}magn.nii.gz')
 
     if has_complex:
         denoised_phase = np.angle(denoised_complex)
@@ -466,7 +682,7 @@ def run_nordic(
         if n_noise_vols > 0:
             denoised_phase = denoised_phase[..., :-n_noise_vols]
         denoised_phase = nb.Nifti1Image(denoised_phase, img.affine, img.header)
-        denoised_phase.to_filename(out_dir / 'phase.nii.gz')
+        denoised_phase.to_filename(out_dir / f'{prefix}phase.nii.gz')
 
     print('Done!')
 
@@ -502,67 +718,43 @@ def filter_phase(data, phase_filter_width, temporal_phase):
     """
     n_x, n_y, n_slices, n_vols = data.shape
 
-    # Preallocate 4D array of zeros
-    # XXX: WHAT IS filtered_phase?
-    # XXX: filtered_phase results are very similar between MATLAB and Python at this point.
-    # The difference image looks like white noise.
-    filtered_phase = np.zeros_like(data)
-
-    # If the temporal phase is 1 - 3, smooth the phase data
-    # Except it's not just the phase data???
     if temporal_phase > 0:
-        # Loop over slices backwards
-        for i_slice in range(n_slices)[::-1]:
-            # Loop over volumes forward, including the noise volumes(???)
-            for j_vol in range(n_vols):
-                # Grab the 2D slice of the 4D array
-                slice_data = data[:, :, i_slice, j_vol]
+        # 2D FFT (axes 0, 1) -> separable Tukey low-pass -> 2D IFFT.
+        # Vectorized across (slice, vol): each 2D operation is independent
+        # along axes 2 and 3, and numpy's FFT/shift apply per-row along the
+        # requested axis, so the per-element output matches the original
+        # per-(slice, vol) loop bit-for-bit.
+        filtered_phase = data
+        for k_dim in range(2):
+            filtered_phase = np.fft.ifftshift(
+                np.fft.ifft(
+                    np.fft.ifftshift(filtered_phase, axes=k_dim),
+                    axis=k_dim,
+                ),
+                axes=k_dim,
+            )
 
-                # Apply 1D FFT to the 2D slice
-                for k_dim in range(2):
-                    slice_data = np.fft.ifftshift(
-                        np.fft.ifft(
-                            np.fft.ifftshift(slice_data, axes=[k_dim]),
-                            n=None,
-                            axis=k_dim,
-                        ),
-                        axes=[k_dim],
-                    )
+        tukey_y = (tukey(n_y, 1) ** phase_filter_width).reshape(1, n_y, 1, 1)
+        tukey_x = (tukey(n_x, 1) ** phase_filter_width).reshape(n_x, 1, 1, 1)
+        filtered_phase = filtered_phase * tukey_y * tukey_x
 
-                # Apply Tukey window to the filtered 2D slice
-                # I've checked that this works on simulated data.
-                # tmp = bsxfun(@times,tmp,reshape(tukeywin(n_y,1).^phase_filter_width,[1 n_y]));
-                tukey_window = tukey(n_y, 1) ** phase_filter_width
-                tukey_window_reshaped = tukey_window.reshape(1, n_y)
-                slice_data = slice_data * tukey_window_reshaped
-                # tmp = bsxfun(@times,tmp,reshape(tukeywin(n_x,1).^phase_filter_width,[n_x 1]));
-                tukey_window = tukey(n_x, 1).T ** phase_filter_width
-                tukey_window_reshaped = tukey_window.reshape(n_x, 1)
-                slice_data = slice_data * tukey_window_reshaped
+        for k_dim in range(2):
+            filtered_phase = np.fft.fftshift(
+                np.fft.fft(
+                    np.fft.fftshift(filtered_phase, axes=k_dim),
+                    axis=k_dim,
+                ),
+                axes=k_dim,
+            )
+    else:
+        filtered_phase = np.zeros_like(data)
 
-                # Apply 1D IFFT to the filtered 2D slice and store in the 4D array
-                for k_dim in range(2):
-                    slice_data = np.fft.fftshift(
-                        np.fft.fft(
-                            np.fft.fftshift(slice_data, axes=[k_dim]),
-                            n=None,
-                            axis=k_dim,
-                        ),
-                        axes=[k_dim],
-                    )
-                filtered_phase[:, :, i_slice, j_vol] = slice_data
-
-    # Secondary step for filtered phase with residual spikes
+    # Replace filtered_phase with raw data wherever the residual phase
+    # deviates by more than 1 radian. Equivalent to the original per-slice
+    # mask-and-overwrite, just done over the full 4D array at once.
     if temporal_phase == 2:
-        for i_slice in range(n_slices)[::-1]:
-            for j_vol in range(n_vols):
-                slice_data = data[:, :, i_slice, j_vol]
-                filtered_phase_slice = filtered_phase[:, :, i_slice, j_vol]
-                phase_diff = np.angle(slice_data / filtered_phase_slice)
-                mask = np.abs(phase_diff) > 1
-                temp_filtered_phase_slice = filtered_phase_slice.copy()
-                temp_filtered_phase_slice[mask] = slice_data[mask]
-                filtered_phase[:, :, i_slice, j_vol] = temp_filtered_phase_slice
+        mask = np.abs(np.angle(data / filtered_phase)) > 1
+        filtered_phase[mask] = data[mask]
 
     return filtered_phase
 
@@ -577,6 +769,8 @@ def estimate_gfactor(
     save_gfactor_map,
     debug=False,
     patch_average=False,
+    n_jobs=1,
+    prefix='',
 ):
     """Estimate the g-factor map.
 
@@ -601,6 +795,10 @@ def estimate_gfactor(
         Default is False.
     patch_average : bool
         Default is False.
+    n_jobs : int or None
+        Number of worker threads for the patch-wise SVD loop. Default ``1``
+        (serial). ``None`` means ``os.cpu_count()``. See ``run_nordic`` for
+        the BLAS-oversubscription caveat that applies whenever ``n_jobs > 1``.
 
     Returns
     -------
@@ -634,60 +832,87 @@ def estimate_gfactor(
         patch_statuses[-1] = 0
 
     print('Estimating g-factor ...')
-    # Preallocate 4D array of zeros
     denoised_data = np.zeros_like(data)
-    # Loop over patches in the x-direction
-    # Looping over y and z happens within the sub_llr_processing function
-    for i_x_patch in range(n_x_patches):
-        (
-            denoised_data,
-            _,
-            total_patch_weights,
-            gfactor,
-            component_threshold,
-            energy_removed,
-            snr_weight,
-        ) = sub_llr_processing(
-            denoised_data=denoised_data,
-            data=data,
-            patch_num=i_x_patch,
-            patch_statuses=patch_statuses,
-            total_patch_weights=total_patch_weights,
-            noise=gfactor,
-            component_threshold=component_threshold,
-            energy_removed=energy_removed,
-            snr_weight=snr_weight,
-            patch_average_sub=patch_overlap,
-            llr_scale=0,
-            filename=str(out_dir / 'out'),
-            kernel_size=kernel_size,
-            nvr_threshold=1,
-            patch_average=patch_average,
-            scale_patches=False,
-            soft_thrs=10,
-        )
+    # patch_statuses is the original "skip mask" mechanism: status==2 means
+    # skip, status==0 means process. Convert it to an explicit list of indices.
+    kept_x_patches = [i for i in range(n_x_patches) if patch_statuses[i] != 2]
+    updates = _run_x_patches_parallel(
+        data=data,
+        kept_x_patches=kept_x_patches,
+        kernel_size=kernel_size,
+        nvr_threshold=1,
+        llr_scale=0,
+        soft_thrs=10,
+        patch_average_sub=patch_overlap,
+        scale_patches=False,
+        n_jobs=n_jobs,
+        desc='g-factor',
+    )
+    u = None  # init so the del below is safe if kept_x_patches is empty
+    for u in updates:
+        s = slice(u.x_start, u.x_start + kernel_size[0])
+        denoised_data[s, :, :, :] += u.denoised
+        total_patch_weights[s, :, :] += u.weights
+        gfactor[s, :, :] += u.noise
+        component_threshold[s, :, :] += u.component_threshold
+        energy_removed[s, :, :] += u.energy_removed
+        snr_weight[s, :, :] += u.snr_weight
+    del u, updates  # last XPatchUpdate would otherwise linger across the divide below
 
-    denoised_data = denoised_data / total_patch_weights[..., None]
-    gfactor = np.sqrt(gfactor / total_patch_weights)
-    component_threshold = component_threshold / total_patch_weights
-    energy_removed = energy_removed / total_patch_weights
-    snr_weight = snr_weight / total_patch_weights
+    # Voxels at the high-x edge are not covered by any kept x-patch
+    # (n_x_patches = n_x - kernel_size[0], and the last kept patch covers
+    # x = n_x_patches - 1 .. n_x - 2), so their accumulator and weight are
+    # both zero. The naive ``acc / weights`` form produced NaN there and
+    # emitted a RuntimeWarning; downstream code in run_nordic then never
+    # cleaned it up because its gate is ``np.sum(gfactor == 0) > 0``.
+    # Use a masked divide so uncovered voxels stay at exact zero, which
+    # lets the run_nordic gate fire and the median fill-in run as intended.
+    cov3d = total_patch_weights != 0
+    cov4d = cov3d[..., None]
+    denoised_data = np.divide(
+        denoised_data, total_patch_weights[..., None],
+        where=cov4d, out=np.zeros_like(denoised_data),
+    )
+    gfactor_var = np.divide(
+        gfactor, total_patch_weights,
+        where=cov3d, out=np.zeros_like(gfactor),
+    )
+    # gfactor accumulates a per-patch real-valued noise variance; the
+    # complex dtype is just inherited from ``np.zeros_like(data[..., 0])``
+    # and the imaginary part is numerical noise. Cast to real (and clip
+    # tiny negatives so sqrt doesn't fabricate NaN) -- the rest of the
+    # code already assumes a real gfactor (e.g. ``gfactor < 1`` in
+    # run_nordic, which would raise on a complex array).
+    gfactor = np.sqrt(np.maximum(gfactor_var.real, 0.0))
+    del gfactor_var
+    component_threshold = np.divide(
+        component_threshold, total_patch_weights,
+        where=cov3d, out=np.zeros_like(component_threshold),
+    )
+    energy_removed = np.divide(
+        energy_removed, total_patch_weights,
+        where=cov3d, out=np.zeros_like(energy_removed),
+    )
+    snr_weight = np.divide(
+        snr_weight, total_patch_weights,
+        where=cov3d, out=np.zeros_like(snr_weight),
+    )
 
     if debug:
         out_img = nb.Nifti1Image(component_threshold, img.affine, img.header)
-        out_img.to_filename(out_dir / 'gfactor_n_components_dropped.nii.gz')
+        out_img.to_filename(out_dir / f'{prefix}gfactor_n_components_dropped.nii.gz')
         del component_threshold, out_img
 
         out_img = nb.Nifti1Image(energy_removed, img.affine, img.header)
-        out_img.to_filename(out_dir / 'gfactor_energy_removed.nii.gz')
+        out_img.to_filename(out_dir / f'{prefix}gfactor_energy_removed.nii.gz')
         del energy_removed, out_img
 
         out_img = nb.Nifti1Image(snr_weight, img.affine, img.header)
-        out_img.to_filename(out_dir / 'gfactor_SNR_weight.nii.gz')
+        out_img.to_filename(out_dir / f'{prefix}gfactor_SNR_weight.nii.gz')
         del snr_weight, out_img
 
         out_img = nb.Nifti1Image(total_patch_weights, img.affine, img.header)
-        out_img.to_filename(out_dir / 'gfactor_n_patch_runs.nii.gz')
+        out_img.to_filename(out_dir / f'{prefix}gfactor_n_patch_runs.nii.gz')
         del total_patch_weights, out_img
 
     print('Completed estimating g-factor')
@@ -709,7 +934,7 @@ def estimate_gfactor(
             gfactor_magn = gfactor_magn * (2**gain_level)
 
         gfactor_img = nb.Nifti1Image(gfactor_magn, img.affine, img.header)
-        gfactor_img.to_filename(out_dir / 'gfactor.nii.gz')
+        gfactor_img.to_filename(out_dir / f'{prefix}gfactor.nii.gz')
 
     return gfactor
 
@@ -729,6 +954,8 @@ def denoise_data(
     llr_scale,
     scale_patches,
     debug=False,
+    n_jobs=1,
+    prefix='',
 ):
     """Denoise the data using NORDIC.
 
@@ -763,6 +990,10 @@ def denoise_data(
         Whether to scale the patches.
     debug : bool
         Default is False.
+    n_jobs : int or None
+        Number of worker threads for the patch-wise SVD loop. Default ``1``
+        (serial). ``None`` means ``os.cpu_count()``. See ``run_nordic`` for
+        the BLAS-oversubscription caveat that applies whenever ``n_jobs > 1``.
 
     Returns
     -------
@@ -797,14 +1028,16 @@ def denoise_data(
             # NORDIC (When noise is flat)
             soft_thrs = None
 
-    # Build threshold from mean first singular value of random data
+    # Build threshold from mean first singular value of random data.
+    # Batched form: 10 successive randn(M, N) calls fill exactly the same
+    # 10*M*N RNG draws (in the same order) as one randn(10, M, N) call, and
+    # numpy's SVD applies LAPACK gesdd independently to each leading-axis
+    # slice, so the per-iteration top singular values are bit-identical to
+    # the loop. Only the final mean reduction may differ at the f64 ULP level.
     n_iters = 10
-    nvr_threshold = 0
-    for _ in range(n_iters):
-        _, S, _ = np.linalg.svd(np.random.normal(size=(np.prod(kernel_size), n_vols)))
-        nvr_threshold += S[0]
-
-    nvr_threshold /= n_iters
+    random_matrices = np.random.normal(size=(n_iters, np.prod(kernel_size), n_vols))
+    singular_values = np.linalg.svd(random_matrices, compute_uv=False)
+    nvr_threshold = float(np.mean(singular_values[:, 0]))
 
     # Scale NVR threshold by measured noise level and error factor
     nvr_threshold *= measured_noise * factor_error
@@ -829,68 +1062,73 @@ def denoise_data(
         patch_statuses[-1] = 0
 
     print('Starting NORDIC ...')
-    # Loop over patches in the x-direction
-    # Looping over y and z happens within the sub_llr_processing function
-    # XXX: Could this be parallelized? The arrays are modified in place, so perhaps not.
-    for i_x_patch in range(n_x_patches):
-        (
-            denoised_data,
-            _,
-            total_patch_weights,
-            noise,
-            component_threshold,
-            energy_removed,
-            snr_weight,
-        ) = sub_llr_processing(
-            denoised_data=denoised_data,
-            data=data,
-            patch_num=i_x_patch,
-            patch_statuses=patch_statuses,
-            total_patch_weights=total_patch_weights,
-            noise=noise,
-            component_threshold=component_threshold,
-            energy_removed=energy_removed,
-            snr_weight=snr_weight,
-            patch_average_sub=patch_overlap,
-            llr_scale=llr_scale,
-            filename=str(out_dir / 'out'),
-            kernel_size=kernel_size,
-            nvr_threshold=nvr_threshold,
-            patch_average=patch_average,
-            scale_patches=scale_patches,
-            soft_thrs=soft_thrs,
-        )
+    # patch_statuses is the original "skip mask" mechanism: status==2 means
+    # skip, status==0 means process. Convert it to an explicit list of indices.
+    kept_x_patches = [i for i in range(n_x_patches) if patch_statuses[i] != 2]
+    updates = _run_x_patches_parallel(
+        data=data,
+        kept_x_patches=kept_x_patches,
+        kernel_size=kernel_size,
+        nvr_threshold=nvr_threshold,
+        llr_scale=llr_scale,
+        soft_thrs=soft_thrs,
+        patch_average_sub=patch_overlap,
+        scale_patches=scale_patches,
+        n_jobs=n_jobs,
+        desc=algorithm,
+    )
+    u = None  # init so the del below is safe if kept_x_patches is empty
+    for u in updates:
+        s = slice(u.x_start, u.x_start + kernel_size[0])
+        denoised_data[s, :, :, :] += u.denoised
+        total_patch_weights[s, :, :] += u.weights
+        noise[s, :, :] += u.noise
+        component_threshold[s, :, :] += u.component_threshold
+        energy_removed[s, :, :] += u.energy_removed
+        snr_weight[s, :, :] += u.snr_weight
+    del u, updates  # last XPatchUpdate would otherwise linger across the divide below
 
     # Assumes that the combination is with N instead of sqrt(N). Works for NVR not MPPCA.
     # These arrays are summed over patches and need to be scaled by the patch scaling factor,
     # which is typically just the number of patches that contribute to each voxel.
-    denoised_data = denoised_data / total_patch_weights[..., None]
+    # Use a masked divide so the uncovered high-x edge stays at exact 0
+    # (its accumulator was zero anyway) without producing NaN + a warning.
+    cov4d = (total_patch_weights != 0)[..., None]
+    denoised_data = np.divide(
+        denoised_data, total_patch_weights[..., None],
+        where=cov4d, out=np.zeros_like(denoised_data),
+    )
     print('Completed NORDIC')
 
     if debug:
-        noise_magn = np.abs(np.sqrt(noise / total_patch_weights))
+        cov3d = total_patch_weights != 0
+        noise_var = np.divide(
+            noise, total_patch_weights,
+            where=cov3d, out=np.zeros_like(noise),
+        )
+        noise_magn = np.abs(np.sqrt(noise_var))
         out_img = nb.Nifti1Image(noise_magn, img.affine, img.header)
-        out_img.to_filename(out_dir / 'noise.nii.gz')
-        del noise, noise_magn, out_img
+        out_img.to_filename(out_dir / f'{prefix}noise.nii.gz')
+        del noise, noise_var, noise_magn, out_img
 
         energy_removed = energy_removed / total_patch_weights
         out_img = nb.Nifti1Image(energy_removed, img.affine, img.header)
-        out_img.to_filename(out_dir / 'energy_removed.nii.gz')
+        out_img.to_filename(out_dir / f'{prefix}energy_removed.nii.gz')
         del energy_removed, out_img
 
         snr_weight = snr_weight / total_patch_weights
         out_img = nb.Nifti1Image(snr_weight, img.affine, img.header)
-        out_img.to_filename(out_dir / 'snr_weight.nii.gz')
+        out_img.to_filename(out_dir / f'{prefix}snr_weight.nii.gz')
         del snr_weight, out_img
 
         # Write out number of components removed
         component_threshold = component_threshold / total_patch_weights
         out_img = nb.Nifti1Image(component_threshold, img.affine, img.header)
-        out_img.to_filename(out_dir / 'n_components_removed.nii.gz')
+        out_img.to_filename(out_dir / f'{prefix}n_components_removed.nii.gz')
         del component_threshold, out_img
 
         out_img = nb.Nifti1Image(total_patch_weights, img.affine, img.header)
-        out_img.to_filename(out_dir / 'n_patch_runs.nii.gz')
+        out_img.to_filename(out_dir / f'{prefix}n_patch_runs.nii.gz')
         del total_patch_weights, out_img
 
         residual = data - denoised_data
@@ -898,13 +1136,13 @@ def denoise_data(
         # Split residuals into magnitude and phase
         residual_magn = np.abs(residual)
         residual_magn_img = nb.Nifti1Image(residual_magn, img.affine, img.header)
-        residual_magn_img.to_filename(out_dir / 'residual_magn.nii.gz')
+        residual_magn_img.to_filename(out_dir / f'{prefix}residual_magn.nii.gz')
         del residual_magn, residual_magn_img
 
         if has_complex:
             residual_phase = np.angle(residual)
             residual_phase_img = nb.Nifti1Image(residual_phase, img.affine, img.header)
-            residual_phase_img.to_filename(out_dir / 'residual_phase.nii.gz')
+            residual_phase_img.to_filename(out_dir / f'{prefix}residual_phase.nii.gz')
             del residual, residual_phase, residual_phase_img
 
     return denoised_data
@@ -1385,6 +1623,19 @@ def subfunction_loop_for_nvr_avg_update(
                 first_removed_component = 0
                 raise NotImplementedError('This block is never executed.')
 
+            # SNR ratio of the largest kept singular value to the singular
+            # value just above the cutoff. When the patch is all zeros (the
+            # branch above sets first_removed_component=0 and S=[0,...]),
+            # S[0]/S[0] would be 0/0 -> NaN with a RuntimeWarning, and that
+            # NaN would then poison the snr_weight reduction for every voxel
+            # the patch touches. Treat all-zero patches as contributing 0
+            # SNR information instead.
+            denom_idx = max(0, first_removed_component - 2)
+            if S[denom_idx] > 0:
+                snr_ratio = float(S[0]) / float(S[denom_idx])
+            else:
+                snr_ratio = 0.0
+
             if patch_avg:
                 # Update the entire patch
                 denoised_x_patch[:, w2_slicex, w3_slicex, :] = denoised_x_patch[
@@ -1395,9 +1646,7 @@ def subfunction_loop_for_nvr_avg_update(
                 # number of singular values *removed*
                 component_threshold[:, w2_slicex, w3_slicex] += n_removed_components
                 energy_removed[:, w2_slicex, w3_slicex] += energy_scrub
-                snr_weight[:, w2_slicex, w3_slicex] += (
-                    S[0] / S[max(0, first_removed_component - 2)]
-                )
+                snr_weight[:, w2_slicex, w3_slicex] += snr_ratio
 
                 # sigmasq_2 is only defined when soft_thrs == 10
                 if sigmasq_2 is not None:
@@ -1422,9 +1671,7 @@ def subfunction_loop_for_nvr_avg_update(
                 total_patch_weights[:, y_patch_center, z_patch_center] += patch_scale
                 component_threshold[:, y_patch_center, z_patch_center, :] += n_removed_components
                 energy_removed[:, y_patch_center, z_patch_center] += energy_scrub
-                snr_weight[:, y_patch_center, z_patch_center] += (
-                    S[0] / S[max(0, first_removed_component - 2)]
-                )
+                snr_weight[:, y_patch_center, z_patch_center] += snr_ratio
                 # sigmasq_2 is only defined when soft_thrs == 10
                 if sigmasq_2 is not None:
                     noise[:, y_patch_center, z_patch_center] += sigmasq_2[first_removed_component]

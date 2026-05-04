@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from nordic.tests.utils import download_test_data, get_test_data_path
+from utils import download_test_data, get_test_data_path
 
 
 @pytest.fixture(scope='session')
