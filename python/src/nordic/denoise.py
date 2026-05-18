@@ -1,6 +1,7 @@
 """Another Python attempt at NORDIC."""
 
 import os
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import NamedTuple
@@ -224,6 +225,7 @@ def run_nordic(
     llr_scale=1,
     n_jobs=1,
     prefix='',
+    magnitude_only=False,
 ):
     """Run NORDIC.
 
@@ -324,6 +326,20 @@ def run_nordic(
         prefix). Pass e.g. ``'sub-01_'`` to write ``sub-01_magn.nii.gz``,
         ``sub-01_phase.nii.gz``, etc. The user supplies any separator they
         want — ``prefix`` is concatenated literally onto the existing names.
+    magnitude_only : bool
+        Mirror the MATLAB ``ARG.magnitude_only=1`` mode. When ``True``:
+
+        - ``pha_file`` is ignored if supplied (warned).
+        - ``temporal_phase`` is forced to 0 (warned if it was non-zero).
+
+        This is the explicit, MATLAB-equivalent way to say "I only have
+        magnitude data; don't run a phase filter on it." Default is
+        ``False``.
+
+        As a safety net, the implicit case ``pha_file is None`` combined
+        with ``temporal_phase != 0`` is also auto-corrected (with a
+        warning), because applying a phase filter to non-existent phase
+        data silently introduces a spurious complex modulation.
 
     Notes
     -----
@@ -418,6 +434,36 @@ def run_nordic(
     assert algorithm in ('nordic', 'mppca', 'gfactor+mppca')
     assert temporal_phase in (0, 1, 2, 3)
     assert phase_filter_width in range(1, 11)
+
+    # MATLAB compatibility: ARG.magnitude_only=1 forces temporal_phase=0 and
+    # ignores phase data. Mirror that here, and apply a safety net for the
+    # common implicit case where a user passes only a magnitude file but
+    # leaves temporal_phase>0 (which would otherwise apply a phase filter
+    # to non-existent phase data and silently introduce a spurious complex
+    # modulation).
+    if magnitude_only:
+        if pha_file is not None:
+            warnings.warn(
+                'magnitude_only=True: ignoring pha_file (matches MATLAB '
+                'ARG.magnitude_only=1).',
+                stacklevel=2,
+            )
+            pha_file = None
+        if temporal_phase != 0:
+            warnings.warn(
+                f'magnitude_only=True: overriding temporal_phase={temporal_phase}'
+                ' -> 0 (matches MATLAB ARG.magnitude_only=1).',
+                stacklevel=2,
+            )
+            temporal_phase = 0
+    elif pha_file is None and temporal_phase != 0:
+        warnings.warn(
+            f'pha_file=None but temporal_phase={temporal_phase}: no phase data'
+            ' available, forcing temporal_phase=0. Pass magnitude_only=True'
+            ' to silence this warning.',
+            stacklevel=2,
+        )
+        temporal_phase = 0
 
     out_dir = Path(out_dir)
     # Auto-create the output directory (matches behaviour of most CLI tools).
@@ -673,7 +719,14 @@ def run_nordic(
     if n_noise_vols > 0:
         denoised_magn = denoised_magn[..., :-n_noise_vols]
 
-    denoised_magn = nb.Nifti1Image(denoised_magn, img.affine, img.header)
+    # Force float32 so that integer-typed inputs (e.g. int16 BOLD) do not get
+    # truncated when nibabel writes the result. Matches MATLAB NIFTI_NORDIC's
+    # info.Datatype = class(I_M) = 'single'. nibabel manages scl_slope/scl_inter
+    # automatically for float types (writes NaN = "no scaling"), so we only
+    # override the dtype here.
+    out_header = img.header.copy()
+    out_header.set_data_dtype(np.float32)
+    denoised_magn = nb.Nifti1Image(denoised_magn.astype(np.float32), img.affine, out_header)
     denoised_magn.to_filename(out_dir / f'{prefix}magn.nii.gz')
 
     if has_complex:
@@ -681,7 +734,9 @@ def run_nordic(
         denoised_phase = (denoised_phase / (2 * np.pi) + range_center) * range_norm
         if n_noise_vols > 0:
             denoised_phase = denoised_phase[..., :-n_noise_vols]
-        denoised_phase = nb.Nifti1Image(denoised_phase, img.affine, img.header)
+        denoised_phase = nb.Nifti1Image(
+            denoised_phase.astype(np.float32), img.affine, out_header
+        )
         denoised_phase.to_filename(out_dir / f'{prefix}phase.nii.gz')
 
     print('Done!')
@@ -1582,9 +1637,25 @@ def subfunction_loop_for_nvr_avg_update(
                     ) / n_volumes
                     rangeMP = 4 * np.sqrt(gamma)
                     rangeData = vals[: R - centering + 1] - vals[R - centering - 1]
+                    # `vals[: R - centering + 1]` is one element longer than
+                    # `rangeMP` (length R - centering); the executable branch
+                    # trimmed the trailing element. The trim was dropped
+                    # during the rust-implementation reorganization but is
+                    # required for the element-wise division below.
+                    rangeData = rangeData[: len(rangeMP)]
                     sigmasq_2 = rangeData / rangeMP  # 1D array with length n_volumes
 
-                    first_removed_component = np.where(sigmasq_2 < sigmasq_1)[0][0]
+                    # When the noise level never exceeds the signal level
+                    # (sigmasq_2 < sigmasq_1 is empty), the executable branch
+                    # interpreted this as "no components are noise" and kept
+                    # all singular values. Mirror that here; the rust-
+                    # implementation reorg dropped the guard and crashed
+                    # with IndexError on patches where this holds.
+                    where_result = np.where(sigmasq_2 < sigmasq_1)[0]
+                    if len(where_result) > 0:
+                        first_removed_component = where_result[0]
+                    else:
+                        first_removed_component = S.size
                     n_removed_components = S.size - first_removed_component
 
                     # MATLAB code used .\, which seems to be switched element-wise division
@@ -1652,7 +1723,13 @@ def subfunction_loop_for_nvr_avg_update(
                 if sigmasq_2 is not None:
                     x_patch_idx = np.arange(k_space_x_patch.shape[0])
                     w1_slicex, w2_slicex, w3_slicex = np.ix_(x_patch_idx, y_patch_idx, z_patch_idx)
-                    noise[w1_slicex, w2_slicex, w3_slicex] += sigmasq_2[first_removed_component]
+                    # In the "no components are noise" branch above,
+                    # first_removed_component is set to S.size, which can
+                    # exceed len(sigmasq_2) on sparse patches. The
+                    # executable branch guarded this index; don't add a
+                    # noise contribution when there's no valid estimate.
+                    if first_removed_component < len(sigmasq_2):
+                        noise[w1_slicex, w2_slicex, w3_slicex] += sigmasq_2[first_removed_component]
 
             else:
                 # Only update a single voxel in the middle of the patch
@@ -1674,7 +1751,8 @@ def subfunction_loop_for_nvr_avg_update(
                 snr_weight[:, y_patch_center, z_patch_center] += snr_ratio
                 # sigmasq_2 is only defined when soft_thrs == 10
                 if sigmasq_2 is not None:
-                    noise[:, y_patch_center, z_patch_center] += sigmasq_2[first_removed_component]
+                    if first_removed_component < len(sigmasq_2):
+                        noise[:, y_patch_center, z_patch_center] += sigmasq_2[first_removed_component]
                 raise NotImplementedError('This block is never executed.')
 
     return (
