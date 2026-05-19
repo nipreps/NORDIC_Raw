@@ -259,11 +259,21 @@ def run_nordic(
         'gfactor+mppca': NORDIC gfactor with MP estimation. ARG.MP = 1 and ARG.NORDIC = 0
         'mppca': MP without gfactor correction. ARG.MP = 2 and ARG.NORDIC = 0
         'nordic': NORDIC only. ARG.MP = 0 and ARG.NORDIC = 1
-    kernel_size_gfactor : len-4 list
-        Default is None.
-    kernel_size_pca : None or len-3 list
-        Default is None.
-        default is val1=val2=val3; ratio of 11:1 between spatial and temproal voxels
+    kernel_size_gfactor : len-4 list or None
+        Patch geometry for g-factor estimation: spatial axes are
+        ``kernel_size_gfactor[:3]`` and the number of temporal volumes
+        used is ``kernel_size_gfactor[3]``. If None (default), auto-
+        defaults to ``[14, 14, 1, 90]`` — matching MATLAB
+        ``NIFTI_NORDIC``'s built-in default. The temporal axis is
+        capped at ``n_vols`` when ``n_vols < 90``.
+    kernel_size_pca : len-3 list or None
+        Patch geometry for the NORDIC denoising SVD. If None (default),
+        auto-computed as ``[round((n_vols * 11) ** (1/3))] * 3`` — a
+        cubic patch with an 11:1 spatial:temporal voxel ratio, matching
+        the MATLAB ``NIFTI_NORDIC`` default. For acquisitions where
+        ``n_slices`` is smaller than the cubic edge length, the third
+        axis is automatically clamped to ``n_slices`` and the in-plane
+        edges are rescaled to ``round(sqrt(n_vols * 11 / n_slices))``.
     phase_slice_average_for_kspace_centering : bool
         if False, not used, if True the series average pr slice is first removed
         default is now False
