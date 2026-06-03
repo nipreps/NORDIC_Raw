@@ -1723,11 +1723,7 @@ def subfunction_loop_for_nvr_avg_update(
                 if sigmasq_2 is not None:
                     x_patch_idx = np.arange(k_space_x_patch.shape[0])
                     w1_slicex, w2_slicex, w3_slicex = np.ix_(x_patch_idx, y_patch_idx, z_patch_idx)
-                    # In the "no components are noise" branch above,
-                    # first_removed_component is set to S.size, which can
-                    # exceed len(sigmasq_2) on sparse patches. The
-                    # executable branch guarded this index; don't add a
-                    # noise contribution when there's no valid estimate.
+                    # Only update noise array when at least some components are noise.
                     if first_removed_component < len(sigmasq_2):
                         noise[w1_slicex, w2_slicex, w3_slicex] += sigmasq_2[first_removed_component]
 
