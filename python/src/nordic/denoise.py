@@ -1646,13 +1646,7 @@ def subfunction_loop_for_nvr_avg_update(
                         n_nonzero_voxels_in_patch - np.arange(R - centering, dtype=int)
                     ) / n_volumes
                     rangeMP = 4 * np.sqrt(gamma)
-                    rangeData = vals[: R - centering + 1] - vals[R - centering - 1]
-                    # `vals[: R - centering + 1]` is one element longer than
-                    # `rangeMP` (length R - centering); the executable branch
-                    # trimmed the trailing element. The trim was dropped
-                    # during the rust-implementation reorganization but is
-                    # required for the element-wise division below.
-                    rangeData = rangeData[: len(rangeMP)]
+                    rangeData = vals[: R - centering] - vals[R - centering - 1]
                     sigmasq_2 = rangeData / rangeMP  # 1D array with length n_volumes
 
                     # When the noise level never exceeds the signal level
