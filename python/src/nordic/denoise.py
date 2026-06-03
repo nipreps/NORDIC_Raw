@@ -729,11 +729,7 @@ def run_nordic(
     if n_noise_vols > 0:
         denoised_magn = denoised_magn[..., :-n_noise_vols]
 
-    # Force float32 so that integer-typed inputs (e.g. int16 BOLD) do not get
-    # truncated when nibabel writes the result. Matches MATLAB NIFTI_NORDIC's
-    # info.Datatype = class(I_M) = 'single'. nibabel manages scl_slope/scl_inter
-    # automatically for float types (writes NaN = "no scaling"), so we only
-    # override the dtype here.
+    # Ensure outputs use float32 to match MATLAB implementation.
     out_header = img.header.copy()
     out_header.set_data_dtype(np.float32)
     denoised_magn = nb.Nifti1Image(denoised_magn.astype(np.float32), img.affine, out_header)
