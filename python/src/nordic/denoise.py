@@ -1650,11 +1650,7 @@ def subfunction_loop_for_nvr_avg_update(
                     sigmasq_2 = rangeData / rangeMP  # 1D array with length n_volumes
 
                     # When the noise level never exceeds the signal level
-                    # (sigmasq_2 < sigmasq_1 is empty), the executable branch
-                    # interpreted this as "no components are noise" and kept
-                    # all singular values. Mirror that here; the rust-
-                    # implementation reorg dropped the guard and crashed
-                    # with IndexError on patches where this holds.
+                    # (sigmasq_2 < sigmasq_1 is empty), treat all components as signal.
                     where_result = np.where(sigmasq_2 < sigmasq_1)[0]
                     if len(where_result) > 0:
                         first_removed_component = where_result[0]
